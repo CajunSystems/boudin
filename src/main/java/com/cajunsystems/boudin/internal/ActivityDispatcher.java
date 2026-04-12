@@ -2,8 +2,8 @@ package com.cajunsystems.boudin.internal;
 
 import com.cajunsystems.boudin.history.HistoryEvent;
 import com.cajunsystems.boudin.history.HistorySerializer;
+import com.cajunsystems.gumbo.api.LogView;
 import com.cajunsystems.gumbo.api.SharedLog;
-import com.cajunsystems.gumbo.api.TypedLogView;
 import com.cajunsystems.gumbo.core.AppendRequest;
 import com.cajunsystems.gumbo.core.LogTag;
 import org.slf4j.Logger;
@@ -65,12 +65,13 @@ public class ActivityDispatcher {
      */
     public void start() {
         LogTag taskTag = LogTag.of("activity-tasks", taskQueue);
-        TypedLogView<HistoryEvent> taskView =
-                sharedLog.getTypedView(taskTag, HistorySerializer.INSTANCE);
+        LogView taskView = sharedLog.getView(taskTag);
 
         // Phase 1: process historical events (crash recovery)
         log.info("ActivityDispatcher[{}]: scanning historical activity tasks...", taskQueue);
-        List<HistoryEvent> historical = taskView.readAll().join();
+        List<HistoryEvent> historical = taskView.readAll().join().stream()
+                .map(entry -> HistorySerializer.INSTANCE.deserialize(entry.data()))
+                .toList();
         for (HistoryEvent event : historical) {
             if (event instanceof HistoryEvent.ActivityScheduled as) {
                 processActivityScheduled(as, true /* isHistorical */);
@@ -80,7 +81,8 @@ public class ActivityDispatcher {
                 taskQueue, historical.size());
 
         // Phase 2: subscribe to tail for new activity tasks (live mode)
-        liveSubscription = taskView.subscribeTail(event -> {
+        liveSubscription = taskView.subscribeTail(entry -> {
+            HistoryEvent event = HistorySerializer.INSTANCE.deserialize(entry.data());
             if (event instanceof HistoryEvent.ActivityScheduled as) {
                 processActivityScheduled(as, false /* not historical */);
             }
@@ -176,9 +178,9 @@ public class ActivityDispatcher {
     private boolean isAlreadyCompleted(String workflowId, String activityId) {
         try {
             LogTag historyTag = LogTag.of("workflow-history", workflowId);
-            TypedLogView<HistoryEvent> historyView =
-                    sharedLog.getTypedView(historyTag, HistorySerializer.INSTANCE);
-            List<HistoryEvent> history = historyView.readAll().join();
+            List<HistoryEvent> history = sharedLog.getView(historyTag).readAll().join().stream()
+                    .map(entry -> HistorySerializer.INSTANCE.deserialize(entry.data()))
+                    .toList();
             return history.stream().anyMatch(
                     e -> (e instanceof HistoryEvent.ActivityCompleted ac
                             && ac.activityId().equals(activityId))

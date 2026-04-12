@@ -2,9 +2,8 @@ package com.cajunsystems.boudin.internal;
 
 import com.cajunsystems.boudin.history.HistoryEvent;
 import com.cajunsystems.boudin.history.HistorySerializer;
+import com.cajunsystems.gumbo.api.LogView;
 import com.cajunsystems.gumbo.api.SharedLog;
-import com.cajunsystems.gumbo.api.TypedLogView;
-import com.cajunsystems.gumbo.core.LogEntry;
 import com.cajunsystems.gumbo.core.LogPosition;
 import com.cajunsystems.gumbo.core.LogTag;
 import org.slf4j.Logger;
@@ -62,12 +61,13 @@ public class WorkflowDispatcher {
      */
     public void start() {
         LogTag taskTag = LogTag.of("workflow-tasks", taskQueue);
-        TypedLogView<HistoryEvent> taskView =
-                sharedLog.getTypedView(taskTag, HistorySerializer.INSTANCE);
+        LogView taskView = sharedLog.getView(taskTag);
 
         // Phase 1: process historical events (crash recovery)
         log.info("WorkflowDispatcher[{}]: scanning historical workflow tasks...", taskQueue);
-        List<HistoryEvent> historical = taskView.readAll().join();
+        List<HistoryEvent> historical = taskView.readAll().join().stream()
+                .map(entry -> HistorySerializer.INSTANCE.deserialize(entry.data()))
+                .toList();
         for (HistoryEvent event : historical) {
             if (event instanceof HistoryEvent.WorkflowStarted ws) {
                 handleWorkflowStarted(ws);
@@ -77,7 +77,8 @@ public class WorkflowDispatcher {
                 taskQueue, historical.size(), runners.size());
 
         // Phase 2: subscribe to the tail for new workflow starts (live mode)
-        liveSubscription = taskView.subscribeTail(event -> {
+        liveSubscription = taskView.subscribeTail(entry -> {
+            HistoryEvent event = HistorySerializer.INSTANCE.deserialize(entry.data());
             if (event instanceof HistoryEvent.WorkflowStarted ws) {
                 handleWorkflowStarted(ws);
             }
@@ -117,10 +118,11 @@ public class WorkflowDispatcher {
 
         // Load the full history to check completion status and enable replay
         LogTag historyTag = LogTag.of("workflow-history", ws.workflowId());
-        TypedLogView<HistoryEvent> historyView =
-                sharedLog.getTypedView(historyTag, HistorySerializer.INSTANCE);
+        LogView historyView = sharedLog.getView(historyTag);
 
-        List<HistoryEvent> history = historyView.readAll().join();
+        List<HistoryEvent> history = historyView.readAll().join().stream()
+                .map(entry -> HistorySerializer.INSTANCE.deserialize(entry.data()))
+                .toList();
         long lastSeqnum = computeLastSeqnum(historyTag, history);
 
         boolean isComplete = history.stream().anyMatch(
@@ -145,7 +147,7 @@ public class WorkflowDispatcher {
         // Read raw entries to get seqnums — we need the last entry's global seqnum
         try {
             List<com.cajunsystems.gumbo.core.LogEntry> rawEntries =
-                    sharedLog.readAll(historyTag).join();
+                    sharedLog.getView(historyTag).readAll().join();
             if (!rawEntries.isEmpty()) {
                 return rawEntries.getLast().seqnum();
             }

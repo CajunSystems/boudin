@@ -6,8 +6,8 @@ import com.cajunsystems.boudin.annotation.WorkflowMethod;
 import com.cajunsystems.boudin.history.HistoryEvent;
 import com.cajunsystems.boudin.history.HistorySerializer;
 import com.cajunsystems.boudin.serialization.KryoSerializer;
+import com.cajunsystems.gumbo.api.LogView;
 import com.cajunsystems.gumbo.api.SharedLog;
-import com.cajunsystems.gumbo.api.TypedLogView;
 import com.cajunsystems.gumbo.core.AppendRequest;
 import com.cajunsystems.gumbo.core.LogPosition;
 import com.cajunsystems.gumbo.core.LogTag;
@@ -112,10 +112,10 @@ class WorkflowStub implements InvocationHandler {
         // Subscribe to history and wait for completion
         CompletableFuture<byte[]> resultFuture = new CompletableFuture<>();
 
-        TypedLogView<HistoryEvent> historyView =
-                sharedLog.getTypedView(historyTag, HistorySerializer.INSTANCE);
+        LogView historyView = sharedLog.getView(historyTag);
 
-        SharedLog.Subscription sub = historyView.subscribe(LogPosition.BEGINNING, event -> {
+        SharedLog.Subscription sub = historyView.subscribe(LogPosition.BEGINNING, entry -> {
+            HistoryEvent event = HistorySerializer.INSTANCE.deserialize(entry.data());
             switch (event) {
                 case HistoryEvent.WorkflowCompleted wc ->
                         resultFuture.complete(wc.result());

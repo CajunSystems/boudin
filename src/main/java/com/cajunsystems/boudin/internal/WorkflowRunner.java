@@ -4,8 +4,8 @@ import com.cajunsystems.boudin.history.HistoryEvent;
 import com.cajunsystems.boudin.history.HistorySerializer;
 import com.cajunsystems.boudin.workflow.WorkflowContext;
 import com.cajunsystems.boudin.workflow.WorkflowThread;
+import com.cajunsystems.gumbo.api.LogView;
 import com.cajunsystems.gumbo.api.SharedLog;
-import com.cajunsystems.gumbo.api.TypedLogView;
 import com.cajunsystems.gumbo.core.LogPosition;
 import com.cajunsystems.gumbo.core.LogTag;
 import org.slf4j.Logger;
@@ -92,12 +92,12 @@ public class WorkflowRunner {
         // (from after the last known history entry so we don't re-deliver replayed events)
         long subscribeFrom = lastHistorySeqnum + 1;
         LogTag historyTag = LogTag.of("workflow-history", workflowId);
-        TypedLogView<HistoryEvent> historyView =
-                sharedLog.getTypedView(historyTag, HistorySerializer.INSTANCE);
+        LogView historyView = sharedLog.getView(historyTag);
 
         historySubscription = historyView.subscribe(
                 new LogPosition(subscribeFrom),
-                event -> onHistoryEvent(event, impl, workflowType)
+                entry -> onHistoryEvent(
+                        HistorySerializer.INSTANCE.deserialize(entry.data()), impl, workflowType)
         );
 
         // Replay historical signals BEFORE starting the workflow thread.
