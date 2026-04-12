@@ -9,7 +9,7 @@ import com.cajunsystems.boudin.api.WorkflowClient;
 import com.cajunsystems.boudin.api.WorkflowOptions;
 import com.cajunsystems.boudin.api.Worker;
 import com.cajunsystems.boudin.workflow.Workflow;
-import com.cajunsystems.gumbo.config.SharedLogConfig;
+import com.cajunsystems.gumbo.service.SharedLogConfig;
 import com.cajunsystems.gumbo.persistence.InMemoryPersistenceAdapter;
 import com.cajunsystems.gumbo.service.SharedLogService;
 import org.junit.jupiter.api.AfterEach;
