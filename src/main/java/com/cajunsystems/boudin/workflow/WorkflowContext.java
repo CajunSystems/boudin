@@ -100,8 +100,10 @@ public class WorkflowContext {
      * @throws ActivityFailureException if the activity failed
      */
     public byte[] awaitActivityResult(String activityId) {
-        CompletableFuture<byte[]> future = new CompletableFuture<>();
-        pendingActivities.put(activityId, future);
+        // computeIfAbsent so that if deliverActivityResult ran first and already put
+        // a completed future in the map, we just join() on that immediately.
+        CompletableFuture<byte[]> future =
+                pendingActivities.computeIfAbsent(activityId, id -> new CompletableFuture<>());
         // Virtual thread parks here — cheap because virtual threads are unmounted during join()
         return future.join();
     }
@@ -111,13 +113,11 @@ public class WorkflowContext {
      * for a pending activity. Unblocks the workflow virtual thread.
      */
     public void deliverActivityResult(String activityId, byte[] resultBytes) {
-        CompletableFuture<byte[]> future = pendingActivities.remove(activityId);
-        if (future != null) {
-            future.complete(resultBytes);
-        } else {
-            log.warn("Received ActivityCompleted for unknown activityId: {} in workflow: {}",
-                    activityId, workflowId);
-        }
+        // computeIfAbsent so that if awaitActivityResult hasn't registered its future yet
+        // (race: activity completed before workflow thread called awaitActivityResult),
+        // we pre-create the future already completed so awaitActivityResult returns immediately.
+        pendingActivities.computeIfAbsent(activityId, id -> new CompletableFuture<>())
+                         .complete(resultBytes);
     }
 
     /**
@@ -125,11 +125,9 @@ public class WorkflowContext {
      * Unblocks the workflow virtual thread with an exception.
      */
     public void deliverActivityFailure(String activityId, String errorType, String message) {
-        CompletableFuture<byte[]> future = pendingActivities.remove(activityId);
-        if (future != null) {
-            future.completeExceptionally(
-                    new ActivityFailureException(activityId, errorType, message));
-        }
+        pendingActivities.computeIfAbsent(activityId, id -> new CompletableFuture<>())
+                         .completeExceptionally(
+                                 new ActivityFailureException(activityId, errorType, message));
     }
 
     // ── Signal / condition waiting ───────────────────────────────────────────

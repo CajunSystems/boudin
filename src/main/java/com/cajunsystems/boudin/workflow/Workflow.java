@@ -123,7 +123,7 @@ public final class Workflow {
      * Returns the {@link WorkflowContext} for the currently executing workflow.
      * Throws {@link IllegalStateException} if called outside a workflow thread.
      */
-    static WorkflowContext currentContext() {
+    public static WorkflowContext currentContext() {
         WorkflowContext ctx = WorkflowThread.CURRENT_CONTEXT.get();
         if (ctx == null) {
             throw new IllegalStateException(
