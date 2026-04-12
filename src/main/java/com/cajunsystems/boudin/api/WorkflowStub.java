@@ -104,16 +104,10 @@ class WorkflowStub implements InvocationHandler {
         log.info("Starting workflow {} (type={}, taskQueue={})",
                 wfId, workflowType, options.taskQueue());
 
-        sharedLog.append(
-                AppendRequest.to(Set.of(taskTag, historyTag),
-                        HistorySerializer.INSTANCE.serialize(startedEvent))
-        ).join();
-
-        // Subscribe to history and wait for completion
+        // Subscribe BEFORE appending WorkflowStarted so we never miss WorkflowCompleted.
+        // A fast workflow may complete before a post-append subscription could register.
         CompletableFuture<byte[]> resultFuture = new CompletableFuture<>();
-
         LogView historyView = sharedLog.getView(historyTag);
-
         SharedLog.Subscription sub = historyView.subscribe(LogPosition.BEGINNING, entry -> {
             HistoryEvent event = HistorySerializer.INSTANCE.deserialize(entry.data());
             switch (event) {
@@ -125,6 +119,11 @@ class WorkflowStub implements InvocationHandler {
                 default -> {}
             }
         });
+
+        sharedLog.append(
+                AppendRequest.to(Set.of(taskTag, historyTag),
+                        HistorySerializer.INSTANCE.serialize(startedEvent))
+        ).join();
 
         try {
             byte[] resultBytes = resultFuture.join(); // blocks caller until workflow completes
