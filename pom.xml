@@ -84,6 +84,12 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
+                <configuration>
+                    <!-- Kill the whole test suite if it runs longer than 2 minutes -->
+                    <forkedProcessTimeoutInSeconds>120</forkedProcessTimeoutInSeconds>
+                    <!-- Each individual test method times out after 30 seconds -->
+                    <timeout>30</timeout>
+                </configuration>
             </plugin>
         </plugins>
     </build>
