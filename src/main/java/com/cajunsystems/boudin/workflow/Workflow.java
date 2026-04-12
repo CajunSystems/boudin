@@ -53,11 +53,13 @@ public final class Workflow {
      */
     @SuppressWarnings("unchecked")
     public static <T> T newActivityStub(Class<T> activityInterface, ActivityOptions options) {
-        WorkflowContext ctx = currentContext();
+        // Do NOT capture the context here — the stub may be created in a field initializer
+        // before the workflow thread starts. ActivityStub resolves the context lazily
+        // on each method invocation via Workflow.currentContext().
         return (T) Proxy.newProxyInstance(
                 activityInterface.getClassLoader(),
                 new Class<?>[]{activityInterface},
-                new ActivityStub(ctx, activityInterface, options)
+                new ActivityStub(activityInterface, options)
         );
     }
 

@@ -5,6 +5,7 @@ import com.cajunsystems.boudin.history.HistoryEvent;
 import com.cajunsystems.boudin.history.HistorySerializer;
 import com.cajunsystems.boudin.internal.ActivityRegistry;
 import com.cajunsystems.boudin.serialization.KryoSerializer;
+import com.cajunsystems.boudin.workflow.Workflow;
 import com.cajunsystems.boudin.workflow.WorkflowContext;
 import com.cajunsystems.gumbo.core.AppendRequest;
 import com.cajunsystems.gumbo.core.LogTag;
@@ -49,12 +50,10 @@ public class ActivityStub implements InvocationHandler {
 
     private static final Logger log = LoggerFactory.getLogger(ActivityStub.class);
 
-    private final WorkflowContext context;
     private final Class<?> activityInterface;
     private final ActivityOptions options;
 
-    public ActivityStub(WorkflowContext context, Class<?> activityInterface, ActivityOptions options) {
-        this.context = context;
+    public ActivityStub(Class<?> activityInterface, ActivityOptions options) {
         this.activityInterface = activityInterface;
         this.options = options;
     }
@@ -70,6 +69,10 @@ public class ActivityStub implements InvocationHandler {
             throw new IllegalStateException(
                     "Method " + method.getName() + " is not annotated with @ActivityMethod");
         }
+
+        // Resolve context lazily — safe whether stub was created in a field initializer
+        // or inside the workflow method body.
+        WorkflowContext context = Workflow.currentContext();
 
         String activityType = ActivityRegistry.activityTypeKey(activityInterface, method);
         int seq = context.replayState.nextActivitySequence(activityType);
