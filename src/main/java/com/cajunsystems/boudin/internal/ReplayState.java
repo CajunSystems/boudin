@@ -59,8 +59,11 @@ public class ReplayState {
      */
     public ReplayState(List<HistoryEvent> history, long lastHistorySeqnum) {
         this.lastHistorySeqnum = lastHistorySeqnum;
-        this.replaying = !history.isEmpty();
         preloadResults(history);
+        // Only replay if there are actual cached results to feed back — a workflow whose
+        // history contains only WorkflowStarted (no completed activities or fired timers)
+        // is effectively brand-new and must run live, not replay.
+        this.replaying = !completedActivities.isEmpty() || !firedTimers.isEmpty();
     }
 
     private void preloadResults(List<HistoryEvent> history) {
