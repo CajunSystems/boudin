@@ -63,6 +63,35 @@ public final class Workflow {
         );
     }
 
+    // ── Child workflow stubs ──────────────────────────────────────────────────
+
+    /**
+     * Creates a typed child workflow stub with default options (inherits parent task queue).
+     */
+    public static <T> T newChildWorkflowStub(Class<T> childWorkflowInterface) {
+        return newChildWorkflowStub(childWorkflowInterface, ChildWorkflowOptions.defaults());
+    }
+
+    /**
+     * Creates a typed child workflow stub with the given options.
+     *
+     * <p>Calling the {@code @WorkflowMethod} on the returned stub starts the child workflow
+     * and blocks the parent virtual thread until the child completes.
+     *
+     * @param childWorkflowInterface the {@code @WorkflowInterface}-annotated interface
+     * @param options task queue override and optional fixed workflow ID
+     * @return a typed proxy that dispatches through the Boudin child workflow system
+     */
+    @SuppressWarnings("unchecked")
+    public static <T> T newChildWorkflowStub(Class<T> childWorkflowInterface,
+                                              ChildWorkflowOptions options) {
+        return (T) Proxy.newProxyInstance(
+                childWorkflowInterface.getClassLoader(),
+                new Class<?>[]{childWorkflowInterface},
+                new ChildWorkflowStub(childWorkflowInterface, options)
+        );
+    }
+
     // ── Sleep ─────────────────────────────────────────────────────────────────
 
     /**
