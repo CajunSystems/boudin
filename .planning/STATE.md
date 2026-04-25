@@ -4,8 +4,8 @@
 
 - **Milestone:** 1 — Production-Ready Boudin
 - **Phase:** 5 — Activity Enforcement
-- **Plan:** 05-01 — Retry policy expansion and retry loop
-- **Status:** Planned, ready to execute
+- **Plan:** 05-01 — Complete
+- **Status:** Plan 05-02 ready to execute (timeout enforcement)
 
 ## Key Decisions
 
