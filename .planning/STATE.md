@@ -3,9 +3,9 @@
 ## Current Position
 
 - **Milestone:** 1 — Production-Ready Boudin
-- **Phase:** 2 — Scalable Crash Recovery
-- **Plan:** 02-02 — ActivityDispatcher Checkpoint + Idempotent Start + Tests
-- **Status:** Planned, ready to execute
+- **Phase:** 3 — NIO Event Loop Infrastructure
+- **Plan:** 03-01 — (to be planned)
+- **Status:** Phase 2 complete; Phase 3 needs planning
 
 ## Key Decisions
 
@@ -17,7 +17,7 @@
 
 ## Active Issues
 
-- Unbounded startup log scan (Phase 2)
+None
 
 ## Notes
 
