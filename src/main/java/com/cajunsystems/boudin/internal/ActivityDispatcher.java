@@ -159,66 +159,78 @@ public class ActivityDispatcher {
         int maxAttempts = scheduled.maxAttempts();
         long initialIntervalMs = scheduled.initialIntervalMs();
         double backoffCoefficient = scheduled.backoffCoefficient();
+        String activityType = scheduled.activityType();
+
+        metrics.activityStarted(activityType);
+        metrics.pendingActivities().incrementAndGet();
+        long activityStartNs = System.nanoTime();
 
         Exception lastException = null;
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            log.debug("Executing activity {} attempt {}/{} (type={}) for workflow {}",
-                    scheduled.activityId(), attempt, maxAttempts,
-                    scheduled.activityType(), scheduled.workflowId());
-            try {
-                long timeoutMs = scheduled.startToCloseTimeoutMs();
-                byte[] resultBytes = (timeoutMs > 0)
-                        ? invokeWithTimeout(scheduled, timeoutMs)
-                        : activityRegistry.invoke(scheduled.activityType(), scheduled.input());
-
-                HistoryEvent.ActivityCompleted completed = new HistoryEvent.ActivityCompleted(
-                        UUID.randomUUID().toString(), Instant.now(),
-                        scheduled.workflowId(), scheduled.activityId(), resultBytes);
-                sharedLog.append(
-                        AppendRequest.to(historyTag, HistorySerializer.INSTANCE.serialize(completed))
-                ).join();
-                log.debug("Activity {} completed for workflow {}",
-                        scheduled.activityId(), scheduled.workflowId());
-                return;
-
-            } catch (Exception e) {
-                lastException = e;
-                Throwable cause = (e instanceof CompletionException) ? e.getCause() : e;
-                boolean isTimeout = cause instanceof TimeoutException;
-                log.warn("Activity {} attempt {}/{} {} for workflow {}: {}",
+        try {
+            for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+                log.debug("Executing activity {} attempt {}/{} (type={}) for workflow {}",
                         scheduled.activityId(), attempt, maxAttempts,
-                        isTimeout ? "timed out" : "failed",
-                        scheduled.workflowId(),
-                        isTimeout ? scheduled.startToCloseTimeoutMs() + "ms" : e.getMessage());
-                if (attempt < maxAttempts) {
-                    long backoffMs = (long) (initialIntervalMs * Math.pow(backoffCoefficient, attempt - 1));
-                    try {
-                        Thread.sleep(backoffMs);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        return; // Worker shutting down
+                        activityType, scheduled.workflowId());
+                try {
+                    long timeoutMs = scheduled.startToCloseTimeoutMs();
+                    byte[] resultBytes = (timeoutMs > 0)
+                            ? invokeWithTimeout(scheduled, timeoutMs)
+                            : activityRegistry.invoke(activityType, scheduled.input());
+
+                    HistoryEvent.ActivityCompleted completed = new HistoryEvent.ActivityCompleted(
+                            UUID.randomUUID().toString(), Instant.now(),
+                            scheduled.workflowId(), scheduled.activityId(), resultBytes);
+                    sharedLog.append(
+                            AppendRequest.to(historyTag, HistorySerializer.INSTANCE.serialize(completed))
+                    ).join();
+                    log.debug("Activity {} completed for workflow {}",
+                            scheduled.activityId(), scheduled.workflowId());
+                    metrics.activityCompleted(activityType, System.nanoTime() - activityStartNs);
+                    return;
+
+                } catch (Exception e) {
+                    lastException = e;
+                    Throwable cause = (e instanceof CompletionException) ? e.getCause() : e;
+                    boolean isTimeout = cause instanceof TimeoutException;
+                    log.warn("Activity {} attempt {}/{} {} for workflow {}: {}",
+                            scheduled.activityId(), attempt, maxAttempts,
+                            isTimeout ? "timed out" : "failed",
+                            scheduled.workflowId(),
+                            isTimeout ? scheduled.startToCloseTimeoutMs() + "ms" : e.getMessage());
+                    if (attempt < maxAttempts) {
+                        metrics.activityRetried(activityType);
+                        long backoffMs = (long) (initialIntervalMs * Math.pow(backoffCoefficient, attempt - 1));
+                        try {
+                            Thread.sleep(backoffMs);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            return; // Worker shutting down
+                        }
                     }
                 }
             }
-        }
 
-        // All attempts exhausted — append permanent failure
-        String message = "Activity failed after " + maxAttempts + " attempt(s)";
-        if (lastException != null && lastException.getMessage() != null) {
-            message += ": " + lastException.getMessage();
-        }
-        log.warn("Activity {} permanently failed for workflow {} after {} attempt(s)",
-                scheduled.activityId(), scheduled.workflowId(), maxAttempts);
+            // All attempts exhausted — append permanent failure
+            metrics.activityFailed(activityType);
+            String message = "Activity failed after " + maxAttempts + " attempt(s)";
+            if (lastException != null && lastException.getMessage() != null) {
+                message += ": " + lastException.getMessage();
+            }
+            log.warn("Activity {} permanently failed for workflow {} after {} attempt(s)",
+                    scheduled.activityId(), scheduled.workflowId(), maxAttempts);
 
-        HistoryEvent.ActivityFailed failed = new HistoryEvent.ActivityFailed(
-                UUID.randomUUID().toString(), Instant.now(),
-                scheduled.workflowId(), scheduled.activityId(), "maxAttemptsExceeded", message);
-        try {
-            sharedLog.append(
-                    AppendRequest.to(historyTag, HistorySerializer.INSTANCE.serialize(failed))
-            ).join();
-        } catch (Exception appendEx) {
-            log.error("Failed to append ActivityFailed for activity {}", scheduled.activityId(), appendEx);
+            HistoryEvent.ActivityFailed failed = new HistoryEvent.ActivityFailed(
+                    UUID.randomUUID().toString(), Instant.now(),
+                    scheduled.workflowId(), scheduled.activityId(), "maxAttemptsExceeded", message);
+            try {
+                sharedLog.append(
+                        AppendRequest.to(historyTag, HistorySerializer.INSTANCE.serialize(failed))
+                ).join();
+            } catch (Exception appendEx) {
+                log.error("Failed to append ActivityFailed for activity {}", scheduled.activityId(), appendEx);
+            }
+        } finally {
+            metrics.pendingActivities().decrementAndGet();
         }
     }
 
