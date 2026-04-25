@@ -63,6 +63,27 @@ public final class Workflow {
         );
     }
 
+    // ── Sleep ─────────────────────────────────────────────────────────────────
+
+    /**
+     * Parks the workflow thread for the given duration.
+     *
+     * <p>Appends {@code TimerStarted} to history, schedules a durable timer, and parks
+     * the workflow virtual thread. When the timer fires, {@code TimerFired} is appended
+     * to history and the workflow resumes.
+     *
+     * <p>During replay, already-fired timers are skipped instantly. If the timer was
+     * in-progress at crash time, it is re-scheduled for the remaining duration.
+     *
+     * @param duration how long to sleep; must be positive
+     */
+    public static void sleep(Duration duration) {
+        if (duration.isNegative() || duration.isZero()) {
+            throw new IllegalArgumentException("sleep duration must be positive: " + duration);
+        }
+        currentContext().sleep(duration);
+    }
+
     // ── Condition waiting ─────────────────────────────────────────────────────
 
     /**
