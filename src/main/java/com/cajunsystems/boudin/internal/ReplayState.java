@@ -51,6 +51,21 @@ public class ReplayState {
     /** Per-timer invocation counter for deterministic timer ID generation. */
     private final ConcurrentHashMap<String, AtomicInteger> timerSequences = new ConcurrentHashMap<>();
 
+    /** Pre-scanned map of childWorkflowId → ChildWorkflowStarted (intent recorded, not yet done). */
+    private final Map<String, HistoryEvent.ChildWorkflowStarted> startedChildWorkflows = new HashMap<>();
+
+    /** Pre-scanned map of childWorkflowId → result bytes for completed child workflows. */
+    private final Map<String, byte[]> completedChildWorkflows = new HashMap<>();
+
+    /**
+     * Pre-scanned map of childWorkflowId → [errorType, message] for failed child workflows.
+     * String[] to avoid importing from the workflow package (circular dependency).
+     */
+    private final Map<String, String[]> failedChildWorkflows = new HashMap<>();
+
+    /** Per-child-workflow-type invocation counter for deterministic child ID generation. */
+    private final ConcurrentHashMap<String, AtomicInteger> childWorkflowSequences = new ConcurrentHashMap<>();
+
     /** True until {@link #finishReplay()} is called. */
     private volatile boolean replaying;
 
@@ -66,7 +81,8 @@ public class ReplayState {
         // Only replay if there are actual cached results to feed back — a workflow whose
         // history contains only WorkflowStarted (no completed activities or fired timers)
         // is effectively brand-new and must run live, not replay.
-        this.replaying = !completedActivities.isEmpty() || !firedTimers.isEmpty();
+        this.replaying = !completedActivities.isEmpty() || !firedTimers.isEmpty()
+                || !completedChildWorkflows.isEmpty() || !failedChildWorkflows.isEmpty();
     }
 
     private void preloadResults(List<HistoryEvent> history) {
@@ -78,6 +94,16 @@ public class ReplayState {
                         startedTimers.put(ts.timerId(), ts);
                 case HistoryEvent.TimerFired tf ->
                         firedTimers.put(tf.timerId(), true);
+                case HistoryEvent.ChildWorkflowStarted cws ->
+                        startedChildWorkflows.put(cws.childWorkflowId(), cws);
+                case HistoryEvent.ChildWorkflowCompleted cwc -> {
+                        startedChildWorkflows.remove(cwc.childWorkflowId()); // no longer pending
+                        completedChildWorkflows.put(cwc.childWorkflowId(), cwc.result());
+                }
+                case HistoryEvent.ChildWorkflowFailed cwf -> {
+                        startedChildWorkflows.remove(cwf.childWorkflowId()); // no longer pending
+                        failedChildWorkflows.put(cwf.childWorkflowId(), new String[]{cwf.errorType(), cwf.message()});
+                }
                 default -> {} // other events not needed for replay cache
             }
         }
@@ -164,6 +190,37 @@ public class ReplayState {
     public int nextTimerSequence(String workflowId) {
         return timerSequences
                 .computeIfAbsent(workflowId, k -> new AtomicInteger(0))
+                .getAndIncrement();
+    }
+
+    public boolean hasChildWorkflowStarted(String childWorkflowId) {
+        return startedChildWorkflows.containsKey(childWorkflowId);
+    }
+
+    public HistoryEvent.ChildWorkflowStarted getChildWorkflowStarted(String childWorkflowId) {
+        return startedChildWorkflows.get(childWorkflowId);
+    }
+
+    public boolean hasChildWorkflowCompleted(String childWorkflowId) {
+        return completedChildWorkflows.containsKey(childWorkflowId);
+    }
+
+    public byte[] getChildWorkflowResult(String childWorkflowId) {
+        return completedChildWorkflows.get(childWorkflowId);
+    }
+
+    public boolean hasChildWorkflowFailed(String childWorkflowId) {
+        return failedChildWorkflows.containsKey(childWorkflowId);
+    }
+
+    /** Returns [errorType, message] or null if not failed. */
+    public String[] getChildWorkflowFailure(String childWorkflowId) {
+        return failedChildWorkflows.get(childWorkflowId);
+    }
+
+    public int nextChildWorkflowSequence(String childWorkflowType) {
+        return childWorkflowSequences
+                .computeIfAbsent(childWorkflowType, k -> new AtomicInteger(0))
                 .getAndIncrement();
     }
 }
