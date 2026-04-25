@@ -9,6 +9,7 @@ import com.cajunsystems.gumbo.core.LogTag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.ByteBuffer;
 import java.time.Instant;
 import java.util.List;
 import java.util.Set;
@@ -21,10 +22,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * or {@link HistoryEvent.ActivityFailed} back to the workflow's history tag.
  *
  * <h2>Startup and crash recovery</h2>
- * On {@link #start()}, reads all historical activity task events from the beginning of
- * the log. For each one that was not yet completed (as determined by scanning the
- * workflow's history), the activity is executed. This handles the case where a worker
- * crashed after scheduling the activity but before completing it.
+ * On {@link #start()}, reads the KV checkpoint seqnum from the {@code activity-tasks:{queue}}
+ * tag. If a checkpoint exists, only events after it are scanned (fast path). If none exists,
+ * the full log is scanned. The checkpoint is updated after the startup scan and after each
+ * live event.
  *
  * <h2>Idempotency</h2>
  * {@code scheduledActivityIds} tracks all activityIds seen in this JVM session.
@@ -38,10 +39,13 @@ import java.util.concurrent.ConcurrentHashMap;
 public class ActivityDispatcher {
 
     private static final Logger log = LoggerFactory.getLogger(ActivityDispatcher.class);
+    private static final String KV_CHECKPOINT = "checkpoint";
 
     private final String taskQueue;
     private final SharedLog sharedLog;
     private final ActivityRegistry activityRegistry;
+
+    private LogView taskView;
 
     /** ActivityIds processed (or in-flight) in this session — prevents double execution. */
     private final Set<String> scheduledActivityIds = ConcurrentHashMap.newKeySet();
@@ -55,37 +59,42 @@ public class ActivityDispatcher {
         this.activityRegistry = activityRegistry;
     }
 
-    /**
-     * Starts the dispatcher:
-     * <ol>
-     *   <li>Reads all historical activity task events and re-executes any that
-     *       were not completed (crash recovery).</li>
-     *   <li>Subscribes to the tail of the task queue for new activity tasks.</li>
-     * </ol>
-     */
     public void start() {
         LogTag taskTag = LogTag.of("activity-tasks", taskQueue);
-        LogView taskView = sharedLog.getView(taskTag);
+        taskView = sharedLog.getView(taskTag);
 
-        // Phase 1: process historical events (crash recovery)
-        log.info("ActivityDispatcher[{}]: scanning historical activity tasks...", taskQueue);
-        List<HistoryEvent> historical = taskView.readAll().join().stream()
-                .map(entry -> HistorySerializer.INSTANCE.deserialize(entry.data()))
-                .toList();
-        for (HistoryEvent event : historical) {
+        long checkpoint = readCheckpoint();
+
+        log.info("ActivityDispatcher[{}]: scanning activity tasks from seqnum {} (checkpoint)...",
+                taskQueue, checkpoint);
+
+        List<com.cajunsystems.gumbo.core.LogEntry> rawEntries =
+                checkpoint == 0
+                    ? taskView.readAll().join()
+                    : taskView.readAfter(checkpoint).join();
+
+        long lastSeqnum = checkpoint;
+        for (com.cajunsystems.gumbo.core.LogEntry entry : rawEntries) {
+            HistoryEvent event = HistorySerializer.INSTANCE.deserialize(entry.data());
             if (event instanceof HistoryEvent.ActivityScheduled as) {
-                processActivityScheduled(as, true /* isHistorical */);
+                processActivityScheduled(as, true /* checkHistory */);
             }
+            lastSeqnum = entry.seqnum();
         }
-        log.info("ActivityDispatcher[{}]: finished historical scan ({} events)",
-                taskQueue, historical.size());
 
-        // Phase 2: subscribe to tail for new activity tasks (live mode)
+        if (lastSeqnum > checkpoint) {
+            saveCheckpoint(lastSeqnum);
+        }
+
+        log.info("ActivityDispatcher[{}]: startup scan complete ({} events, checkpoint now {})",
+                taskQueue, rawEntries.size(), lastSeqnum);
+
         liveSubscription = taskView.subscribeTail(entry -> {
             HistoryEvent event = HistorySerializer.INSTANCE.deserialize(entry.data());
             if (event instanceof HistoryEvent.ActivityScheduled as) {
                 processActivityScheduled(as, false /* not historical */);
             }
+            saveCheckpoint(entry.seqnum());
         });
     }
 
@@ -99,27 +108,23 @@ public class ActivityDispatcher {
     // ── Private ───────────────────────────────────────────────────────────────
 
     private void processActivityScheduled(HistoryEvent.ActivityScheduled as, boolean checkHistory) {
-        // Skip activities for types we don't handle
         if (!activityRegistry.isRegistered(as.activityType())) {
             log.debug("ActivityDispatcher[{}]: ignoring activity {} (type {} not registered)",
                     taskQueue, as.activityId(), as.activityType());
             return;
         }
 
-        // Idempotency: skip if already processing in this session
         if (!scheduledActivityIds.add(as.activityId())) {
             log.debug("ActivityDispatcher[{}]: skipping duplicate activity {}", taskQueue, as.activityId());
             return;
         }
 
-        // For historical events: check if already completed to avoid re-execution
         if (checkHistory && isAlreadyCompleted(as.workflowId(), as.activityId())) {
             log.debug("ActivityDispatcher[{}]: activity {} already completed, skipping",
                     taskQueue, as.activityId());
             return;
         }
 
-        // Execute on a dedicated virtual thread
         Thread.ofVirtual()
                 .name("boudin-activity-" + as.activityId())
                 .start(() -> executeActivity(as));
@@ -171,10 +176,6 @@ public class ActivityDispatcher {
         }
     }
 
-    /**
-     * Checks whether the given activity already has a result in the workflow's history.
-     * Used during startup to skip activities completed before the last crash.
-     */
     private boolean isAlreadyCompleted(String workflowId, String activityId) {
         try {
             LogTag historyTag = LogTag.of("workflow-history", workflowId);
@@ -188,7 +189,29 @@ public class ActivityDispatcher {
                             && af.activityId().equals(activityId)));
         } catch (Exception e) {
             log.warn("Could not check activity completion for {}: {}", activityId, e.getMessage());
-            return false; // safer to try execution than to silently skip
+            return false;
+        }
+    }
+
+    private long readCheckpoint() {
+        if (taskView == null) return 0L;
+        try {
+            byte[] data = taskView.getValue(KV_CHECKPOINT).join();
+            if (data == null || data.length < 8) return 0L;
+            return ByteBuffer.wrap(data).getLong();
+        } catch (Exception e) {
+            log.warn("ActivityDispatcher[{}]: failed to read checkpoint from KV, starting from 0",
+                    taskQueue, e);
+            return 0L;
+        }
+    }
+
+    private void saveCheckpoint(long seqnum) {
+        if (taskView == null) return;
+        try {
+            taskView.setValue(KV_CHECKPOINT, ByteBuffer.allocate(8).putLong(seqnum).array()).join();
+        } catch (Exception e) {
+            log.warn("ActivityDispatcher[{}]: failed to save checkpoint {} to KV", taskQueue, seqnum, e);
         }
     }
 }
