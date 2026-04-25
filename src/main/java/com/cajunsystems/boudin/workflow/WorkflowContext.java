@@ -2,6 +2,7 @@ package com.cajunsystems.boudin.workflow;
 
 import com.cajunsystems.boudin.activity.ActivityFailureException;
 import com.cajunsystems.boudin.history.HistoryEvent;
+import com.cajunsystems.boudin.workflow.ChildWorkflowFailureException;
 import com.cajunsystems.boudin.history.HistorySerializer;
 import com.cajunsystems.boudin.internal.HashedWheelTimer;
 import com.cajunsystems.boudin.internal.ReplayState;
@@ -76,6 +77,13 @@ public class WorkflowContext {
      * Pending timer futures: timerId → CompletableFuture&lt;Void&gt;.
      */
     private final ConcurrentHashMap<String, CompletableFuture<Void>> pendingTimers =
+            new ConcurrentHashMap<>();
+
+    /**
+     * Pending child workflow futures: childWorkflowId → CompletableFuture<byte[]>.
+     * Put by workflow thread via awaitChildWorkflowResult; completed by watcher virtual thread.
+     */
+    private final ConcurrentHashMap<String, CompletableFuture<byte[]>> pendingChildWorkflows =
             new ConcurrentHashMap<>();
 
     /**
@@ -285,6 +293,47 @@ public class WorkflowContext {
 
         scheduleTimer(timerId, duration.toMillis());
         awaitTimer(timerId);
+    }
+
+    // ── Child workflow coordination ──────────────────────────────────────────
+
+    /**
+     * Parks the workflow virtual thread until the child workflow completes or fails.
+     *
+     * @return Kryo-serialized result bytes, or null for void return type
+     * @throws ChildWorkflowFailureException if the child workflow failed
+     */
+    public byte[] awaitChildWorkflowResult(String childWorkflowId) {
+        CompletableFuture<byte[]> future =
+                pendingChildWorkflows.computeIfAbsent(childWorkflowId, id -> new CompletableFuture<>());
+        try {
+            return future.join();
+        } catch (java.util.concurrent.CompletionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException re) throw re;
+            throw e;
+        } finally {
+            pendingChildWorkflows.remove(childWorkflowId);
+        }
+    }
+
+    /**
+     * Called when ChildWorkflowCompleted arrives in parent history. Unblocks the workflow thread.
+     */
+    public void deliverChildWorkflowResult(String childWorkflowId, byte[] resultBytes) {
+        pendingChildWorkflows
+                .computeIfAbsent(childWorkflowId, id -> new CompletableFuture<>())
+                .complete(resultBytes);
+    }
+
+    /**
+     * Called when ChildWorkflowFailed arrives in parent history. Unblocks with exception.
+     */
+    public void deliverChildWorkflowFailure(String childWorkflowId, String errorType, String message) {
+        pendingChildWorkflows
+                .computeIfAbsent(childWorkflowId, id -> new CompletableFuture<>())
+                .completeExceptionally(
+                        new ChildWorkflowFailureException(childWorkflowId, errorType, message));
     }
 
     private void scheduleTimer(String timerId, long delayMs) {
