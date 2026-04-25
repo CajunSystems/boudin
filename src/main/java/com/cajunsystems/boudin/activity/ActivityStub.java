@@ -107,7 +107,12 @@ public class ActivityStub implements InvocationHandler {
                 activityId,
                 activityType,
                 targetTaskQueue,
-                inputBytes
+                inputBytes,
+                options.maxAttempts(),
+                options.startToCloseTimeout().toMillis(),
+                options.initialInterval().toMillis(),
+                options.backoffCoefficient(),
+                options.scheduleToStartTimeout() != null ? options.scheduleToStartTimeout().toMillis() : 0L
         );
 
         // Atomic dual-tag append: workflow history + activity task queue

@@ -71,10 +71,15 @@ public sealed interface HistoryEvent
             String eventId,
             Instant timestamp,
             String workflowId,
-            String activityId,   // workflowId:activityType:sequenceNumber
-            String activityType, // "InterfaceName#methodName"
+            String activityId,          // workflowId:activityType:sequenceNumber
+            String activityType,        // "InterfaceName#methodName"
             String taskQueue,
-            byte[] input         // KryoSerializer.toBytes(Object[] args)
+            byte[] input,               // KryoSerializer.toBytes(Object[] args)
+            int maxAttempts,
+            long startToCloseTimeoutMs,
+            long initialIntervalMs,
+            double backoffCoefficient,
+            long scheduleToStartTimeoutMs // 0 = no limit
     ) implements HistoryEvent {}
 
     /**
