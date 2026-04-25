@@ -1,14 +1,22 @@
 package com.cajunsystems.boudin.workflow;
 
 import com.cajunsystems.boudin.activity.ActivityFailureException;
+import com.cajunsystems.boudin.history.HistoryEvent;
+import com.cajunsystems.boudin.history.HistorySerializer;
+import com.cajunsystems.boudin.internal.HashedWheelTimer;
 import com.cajunsystems.boudin.internal.ReplayState;
 import com.cajunsystems.boudin.serialization.KryoSerializer;
 import com.cajunsystems.gumbo.api.SharedLog;
+import com.cajunsystems.gumbo.core.AppendRequest;
+import com.cajunsystems.gumbo.core.LogTag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Method;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BooleanSupplier;
@@ -54,6 +62,9 @@ public class WorkflowContext {
     /** Replay machinery (set at construction, read-only after that) */
     public final ReplayState replayState;
 
+    /** Timer wheel for scheduling durable sleeps. */
+    private final HashedWheelTimer timerWheel;
+
     /**
      * Pending activity futures: activityId → CompletableFuture&lt;byte[]&gt;.
      * Put by workflow thread, completed by dispatcher thread.
@@ -81,12 +92,14 @@ public class WorkflowContext {
     public final CompletableFuture<byte[]> completionFuture = new CompletableFuture<>();
 
     public WorkflowContext(String workflowId, String workflowType, String taskQueue,
-                           SharedLog sharedLog, ReplayState replayState) {
+                           SharedLog sharedLog, ReplayState replayState,
+                           HashedWheelTimer timerWheel) {
         this.workflowId = workflowId;
         this.workflowType = workflowType;
         this.taskQueue = taskQueue;
         this.sharedLog = sharedLog;
         this.replayState = replayState;
+        this.timerWheel = timerWheel;
     }
 
     // ── Activity coordination ────────────────────────────────────────────────
@@ -213,6 +226,7 @@ public class WorkflowContext {
         CompletableFuture<Void> future = new CompletableFuture<>();
         pendingTimers.put(timerId, future);
         future.join();
+        pendingTimers.remove(timerId);
     }
 
     /**
@@ -221,5 +235,70 @@ public class WorkflowContext {
     public void deliverTimerFired(String timerId) {
         CompletableFuture<Void> future = pendingTimers.remove(timerId);
         if (future != null) future.complete(null);
+    }
+
+    /** Returns the set of timer IDs currently awaiting delivery. Used for cleanup on close. */
+    public Set<String> pendingTimerIds() {
+        return Set.copyOf(pendingTimers.keySet());
+    }
+
+    /**
+     * Implements {@link com.cajunsystems.boudin.workflow.Workflow#sleep(Duration)}.
+     *
+     * <p>Three cases:
+     * <ol>
+     *   <li>Replay: timer already fired in history → return immediately</li>
+     *   <li>In-progress recovery: TimerStarted in history but no TimerFired → re-schedule for remaining duration</li>
+     *   <li>Live: append TimerStarted, schedule on timer wheel, park virtual thread</li>
+     * </ol>
+     */
+    public void sleep(Duration duration) {
+        int seq = replayState.nextTimerSequence(workflowId);
+        String timerId = workflowId + ":timer:" + seq;
+
+        if (replayState.hasTimerFired(timerId)) {
+            return; // already fired in history — skip during replay
+        }
+
+        HistoryEvent.TimerStarted prior = replayState.getTimerStarted(timerId);
+        if (prior != null) {
+            // In-progress crash recovery: re-schedule for remaining duration
+            long elapsedMs = Duration.between(prior.timestamp(), Instant.now()).toMillis();
+            long remainingMs = Math.max(0, prior.durationMillis() - elapsedMs);
+            scheduleTimer(timerId, remainingMs);
+            awaitTimer(timerId);
+            return;
+        }
+
+        // Live execution: persist TimerStarted, schedule, park
+        LogTag historyTag = LogTag.of("workflow-history", workflowId);
+        HistoryEvent.TimerStarted startedEvent = new HistoryEvent.TimerStarted(
+                UUID.randomUUID().toString(), Instant.now(), workflowId, timerId, duration.toMillis());
+        sharedLog.append(
+                AppendRequest.to(historyTag, HistorySerializer.INSTANCE.serialize(startedEvent))
+        ).join();
+
+        scheduleTimer(timerId, duration.toMillis());
+        awaitTimer(timerId);
+    }
+
+    private void scheduleTimer(String timerId, long delayMs) {
+        timerWheel.schedule(timerId, delayMs, () ->
+            // Timer fires on event loop thread; spawn virtual thread for the log I/O
+            Thread.ofVirtual().name("boudin-timer-fire-" + timerId).start(() -> {
+                LogTag historyTag = LogTag.of("workflow-history", workflowId);
+                HistoryEvent.TimerFired firedEvent = new HistoryEvent.TimerFired(
+                        UUID.randomUUID().toString(), Instant.now(), workflowId, timerId);
+                try {
+                    sharedLog.append(
+                            AppendRequest.to(historyTag, HistorySerializer.INSTANCE.serialize(firedEvent))
+                    ).join();
+                } catch (Exception e) {
+                    log.error("Failed to append TimerFired for timer {} in workflow {}",
+                            timerId, workflowId, e);
+                }
+                // WorkflowRunner's history subscription delivers TimerFired via event loop
+            })
+        );
     }
 }
