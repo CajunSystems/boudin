@@ -135,6 +135,18 @@ public class ActivityDispatcher {
             return;
         }
 
+        long scheduleToStartMs = as.scheduleToStartTimeoutMs();
+        if (scheduleToStartMs > 0) {
+            long ageMs = Duration.between(as.timestamp(), Instant.now()).toMillis();
+            if (ageMs > scheduleToStartMs) {
+                log.warn("ActivityDispatcher[{}]: activity {} exceeded schedule-to-start timeout " +
+                        "({} ms old, limit {} ms), failing without execution",
+                        taskQueue, as.activityId(), ageMs, scheduleToStartMs);
+                appendScheduleToStartFailure(as);
+                return;
+            }
+        }
+
         Thread.ofVirtual()
                 .name("boudin-activity-" + as.activityId())
                 .start(() -> executeActivity(as));
@@ -245,6 +257,21 @@ public class ActivityDispatcher {
         } catch (Exception e) {
             log.warn("Could not check activity completion for {}: {}", activityId, e.getMessage());
             return false;
+        }
+    }
+
+    private void appendScheduleToStartFailure(HistoryEvent.ActivityScheduled as) {
+        LogTag historyTag = LogTag.of("workflow-history", as.workflowId());
+        String message = "Activity not picked up within " + as.scheduleToStartTimeoutMs() + "ms";
+        HistoryEvent.ActivityFailed failed = new HistoryEvent.ActivityFailed(
+                UUID.randomUUID().toString(), Instant.now(),
+                as.workflowId(), as.activityId(), "scheduleToStartExceeded", message);
+        try {
+            sharedLog.append(
+                    AppendRequest.to(historyTag, HistorySerializer.INSTANCE.serialize(failed))
+            ).join();
+        } catch (Exception e) {
+            log.error("Failed to append scheduleToStartExceeded for activity {}", as.activityId(), e);
         }
     }
 
