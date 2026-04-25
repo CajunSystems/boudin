@@ -64,7 +64,7 @@ public class Worker implements AutoCloseable {
         this.activityRegistry = new ActivityRegistry();
         this.eventLoop = new BoudinEventLoop(builder.taskQueue);
         this.timerWheel = new HashedWheelTimer(eventLoop);
-        this.workflowDispatcher = new WorkflowDispatcher(taskQueue, sharedLog, workflowRegistry, eventLoop);
+        this.workflowDispatcher = new WorkflowDispatcher(taskQueue, sharedLog, workflowRegistry, eventLoop, timerWheel);
         this.activityDispatcher = new ActivityDispatcher(taskQueue, sharedLog, activityRegistry);
     }
 

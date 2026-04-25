@@ -48,6 +48,7 @@ public class WorkflowRunner {
 
     private final Runnable onComplete;
     private final BoudinEventLoop eventLoop;
+    private final HashedWheelTimer timerWheel;
 
     private WorkflowContext context;
     private WorkflowThread workflowThread;
@@ -61,7 +62,8 @@ public class WorkflowRunner {
                           List<HistoryEvent> existingHistory,
                           long lastHistorySeqnum,
                           Runnable onComplete,
-                          BoudinEventLoop eventLoop) {
+                          BoudinEventLoop eventLoop,
+                          HashedWheelTimer timerWheel) {
         this.workflowId = workflowId;
         this.taskQueue = taskQueue;
         this.sharedLog = sharedLog;
@@ -70,6 +72,7 @@ public class WorkflowRunner {
         this.lastHistorySeqnum = lastHistorySeqnum;
         this.onComplete = onComplete;
         this.eventLoop = eventLoop;
+        this.timerWheel = timerWheel;
     }
 
     /**
@@ -96,7 +99,7 @@ public class WorkflowRunner {
 
         // Create context
         context = new WorkflowContext(
-                workflowId, workflowType, taskQueue, sharedLog, replayState);
+                workflowId, workflowType, taskQueue, sharedLog, replayState, timerWheel);
 
         // Subscribe to workflow-history:{workflowId} for LIVE events only
         // (from after the last known history entry so we don't re-deliver replayed events)
@@ -188,8 +191,14 @@ public class WorkflowRunner {
         }
     }
 
-    /** Closes the history subscription and interrupts the workflow thread. */
+    /** Closes the history subscription, cancels pending timers, and interrupts the workflow thread. */
     public void close() {
+        // Cancel any pending timers before closing the history subscription
+        if (context != null) {
+            for (String timerId : context.pendingTimerIds()) {
+                timerWheel.cancel(timerId);
+            }
+        }
         if (historySubscription != null) {
             try { historySubscription.close(); } catch (Exception ignored) {}
             historySubscription = null;

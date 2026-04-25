@@ -41,6 +41,7 @@ public class WorkflowDispatcher {
     private final SharedLog sharedLog;
     private final WorkflowRegistry workflowRegistry;
     private final BoudinEventLoop eventLoop;
+    private final HashedWheelTimer timerWheel;
 
     private LogView taskView;
     private final Set<String> knownWorkflowIds = ConcurrentHashMap.newKeySet();
@@ -51,11 +52,13 @@ public class WorkflowDispatcher {
     private SharedLog.Subscription liveSubscription;
 
     public WorkflowDispatcher(String taskQueue, SharedLog sharedLog,
-                               WorkflowRegistry workflowRegistry, BoudinEventLoop eventLoop) {
+                               WorkflowRegistry workflowRegistry, BoudinEventLoop eventLoop,
+                               HashedWheelTimer timerWheel) {
         this.taskQueue = taskQueue;
         this.sharedLog = sharedLog;
         this.workflowRegistry = workflowRegistry;
         this.eventLoop = eventLoop;
+        this.timerWheel = timerWheel;
     }
 
     public void start() {
@@ -153,7 +156,7 @@ public class WorkflowDispatcher {
                 workflowId, taskQueue, sharedLog, workflowRegistry,
                 history, lastSeqnum,
                 () -> onWorkflowComplete(workflowId),
-                eventLoop);
+                eventLoop, timerWheel);
         runners.put(workflowId, runner);
         runner.start(startedEvent);
     }
@@ -192,7 +195,7 @@ public class WorkflowDispatcher {
                 ws.workflowId(), taskQueue, sharedLog, workflowRegistry,
                 history, lastSeqnum,
                 () -> onWorkflowComplete(ws.workflowId()),
-                eventLoop);
+                eventLoop, timerWheel);
         runners.put(ws.workflowId(), runner);
         runner.start(ws);
     }
