@@ -12,6 +12,8 @@ import java.time.Duration;
  * ActivityOptions options = ActivityOptions.newBuilder()
  *     .startToCloseTimeout(Duration.ofSeconds(30))
  *     .maxAttempts(3)
+ *     .initialInterval(Duration.ofSeconds(2))
+ *     .backoffCoefficient(2.0)
  *     .build();
  * MyActivities activities = Workflow.newActivityStub(MyActivities.class, options);
  * }</pre>
@@ -19,16 +21,24 @@ import java.time.Duration;
 public final class ActivityOptions {
 
     private static final ActivityOptions DEFAULTS = new ActivityOptions(
-            null, Duration.ofSeconds(10), 1);
+            null, Duration.ofSeconds(10), 1, Duration.ofSeconds(1), 2.0, null);
 
     private final String taskQueue;
     private final Duration startToCloseTimeout;
     private final int maxAttempts;
+    private final Duration initialInterval;
+    private final double backoffCoefficient;
+    private final Duration scheduleToStartTimeout; // null = no limit
 
-    private ActivityOptions(String taskQueue, Duration startToCloseTimeout, int maxAttempts) {
+    private ActivityOptions(String taskQueue, Duration startToCloseTimeout, int maxAttempts,
+                            Duration initialInterval, double backoffCoefficient,
+                            Duration scheduleToStartTimeout) {
         this.taskQueue = taskQueue;
         this.startToCloseTimeout = startToCloseTimeout;
         this.maxAttempts = maxAttempts;
+        this.initialInterval = initialInterval;
+        this.backoffCoefficient = backoffCoefficient;
+        this.scheduleToStartTimeout = scheduleToStartTimeout;
     }
 
     /** Returns a sensible default: 10-second timeout, 1 attempt, workflow's own task queue. */
@@ -40,9 +50,7 @@ public final class ActivityOptions {
         return new Builder();
     }
 
-    /**
-     * Task queue override for this activity. Null means use the workflow's task queue.
-     */
+    /** Task queue override for this activity. Null means use the workflow's task queue. */
     public String taskQueue() {
         return taskQueue;
     }
@@ -57,10 +65,31 @@ public final class ActivityOptions {
         return maxAttempts;
     }
 
+    /** Delay before the first retry (attempt 1→2). Subsequent delays are multiplied by backoffCoefficient. */
+    public Duration initialInterval() {
+        return initialInterval;
+    }
+
+    /** Backoff multiplier: delay(n) = initialInterval × backoffCoefficient^(n-1). */
+    public double backoffCoefficient() {
+        return backoffCoefficient;
+    }
+
+    /**
+     * Maximum time between when the activity is scheduled and when execution starts.
+     * Null means no limit. Enforced by the activity dispatcher on dispatch.
+     */
+    public Duration scheduleToStartTimeout() {
+        return scheduleToStartTimeout;
+    }
+
     public static final class Builder {
         private String taskQueue;
         private Duration startToCloseTimeout = Duration.ofSeconds(10);
         private int maxAttempts = 1;
+        private Duration initialInterval = Duration.ofSeconds(1);
+        private double backoffCoefficient = 2.0;
+        private Duration scheduleToStartTimeout = null;
 
         private Builder() {}
 
@@ -82,8 +111,27 @@ public final class ActivityOptions {
             return this;
         }
 
+        /** Set the delay before the first retry. */
+        public Builder initialInterval(Duration initialInterval) {
+            this.initialInterval = initialInterval;
+            return this;
+        }
+
+        /** Set the exponential backoff multiplier (1.0 = constant interval). */
+        public Builder backoffCoefficient(double backoffCoefficient) {
+            this.backoffCoefficient = backoffCoefficient;
+            return this;
+        }
+
+        /** Set the maximum time from scheduling to dispatch start. Null = no limit. */
+        public Builder scheduleToStartTimeout(Duration scheduleToStartTimeout) {
+            this.scheduleToStartTimeout = scheduleToStartTimeout;
+            return this;
+        }
+
         public ActivityOptions build() {
-            return new ActivityOptions(taskQueue, startToCloseTimeout, maxAttempts);
+            return new ActivityOptions(taskQueue, startToCloseTimeout, maxAttempts,
+                                       initialInterval, backoffCoefficient, scheduleToStartTimeout);
         }
     }
 }
