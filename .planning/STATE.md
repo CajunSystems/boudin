@@ -3,9 +3,9 @@
 ## Current Position
 
 - **Milestone:** 1 — Production-Ready Boudin
-- **Phase:** 5 — Activity Enforcement
-- **Plan:** 05-02 — Complete
-- **Status:** Phase 5 complete, ready for Phase 6
+- **Phase:** 6 — Child Workflows
+- **Plan:** 06-01 — Not started
+- **Status:** Phase 6 planned (3 plans), ready to execute 06-01
 
 ## Key Decisions
 
