@@ -5,6 +5,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
@@ -50,6 +52,11 @@ public class WorkflowRegistry {
             }
         };
 
+        if (workflows.containsKey(workflowType)) {
+            throw new IllegalArgumentException(
+                    "Workflow type '" + workflowType + "' is already registered. " +
+                    "Existing: " + workflows.get(workflowType).workflowInterface().getName());
+        }
         workflows.put(workflowType, new WorkflowEntry(factory, workflowInterface, workflowMethod));
         log.debug("Registered workflow: {} -> {}", workflowType, implClass.getName());
     }
@@ -130,11 +137,21 @@ public class WorkflowRegistry {
                 implClass.getName() + " does not implement any @WorkflowInterface-annotated interface");
     }
 
-    private static Method findAnnotatedMethod(Class<?> iface, Class<? extends java.lang.annotation.Annotation> annotationClass) {
-        for (Method method : iface.getDeclaredMethods()) {
-            if (method.isAnnotationPresent(annotationClass)) return method;
+    private static Method findAnnotatedMethod(Class<?> iface,
+            Class<? extends java.lang.annotation.Annotation> annotationClass) {
+        List<Method> matches = Arrays.stream(iface.getDeclaredMethods())
+                .filter(m -> m.isAnnotationPresent(annotationClass))
+                .toList();
+        if (matches.isEmpty()) {
+            throw new IllegalArgumentException(
+                    iface.getName() + " has no @" + annotationClass.getSimpleName() + "-annotated method");
         }
-        throw new IllegalArgumentException(
-                iface.getName() + " has no @" + annotationClass.getSimpleName() + "-annotated method");
+        if (matches.size() > 1) {
+            throw new IllegalArgumentException(
+                    iface.getName() + " has " + matches.size() + " @" +
+                    annotationClass.getSimpleName() + "-annotated methods; exactly one is required. " +
+                    "Found: " + matches.stream().map(Method::getName).toList());
+        }
+        return matches.getFirst();
     }
 }
