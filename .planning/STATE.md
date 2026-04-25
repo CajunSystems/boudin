@@ -4,8 +4,8 @@
 
 - **Milestone:** 1 — Production-Ready Boudin
 - **Phase:** 3 — NIO Event Loop Infrastructure
-- **Plan:** 03-01 — (to be planned)
-- **Status:** Phase 2 complete; Phase 3 needs planning
+- **Plan:** 03-01 — BoudinEventLoop + HashedWheelTimer + Worker wiring
+- **Status:** Planned, ready to execute
 
 ## Key Decisions
 
