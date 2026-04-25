@@ -4,8 +4,8 @@
 
 - **Milestone:** 1 — Production-Ready Boudin
 - **Phase:** 6 — Child Workflows
-- **Plan:** 06-01 — Complete
-- **Status:** Plan 06-01 complete, ready for 06-02
+- **Plan:** 06-02 — Complete
+- **Status:** Plan 06-02 complete, ready for 06-03
 
 ## Key Decisions
 
