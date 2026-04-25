@@ -24,7 +24,10 @@ public sealed interface HistoryEvent
                 HistoryEvent.ActivityFailed,
                 HistoryEvent.SignalReceived,
                 HistoryEvent.TimerStarted,
-                HistoryEvent.TimerFired {
+                HistoryEvent.TimerFired,
+                HistoryEvent.ChildWorkflowStarted,
+                HistoryEvent.ChildWorkflowCompleted,
+                HistoryEvent.ChildWorkflowFailed {
 
     String eventId();
     Instant timestamp();
@@ -135,5 +138,44 @@ public sealed interface HistoryEvent
             Instant timestamp,
             String workflowId,
             String timerId
+    ) implements HistoryEvent {}
+
+    /**
+     * Parent has requested a child workflow be started. Written to
+     * {@code workflow-history:{parentWorkflowId}} before the child's WorkflowStarted is written.
+     */
+    record ChildWorkflowStarted(
+            String eventId,
+            Instant timestamp,
+            String parentWorkflowId,
+            String childWorkflowId,
+            String childWorkflowType,
+            String taskQueue,
+            byte[] input
+    ) implements HistoryEvent {}
+
+    /**
+     * Child workflow completed successfully. Written to {@code workflow-history:{parentWorkflowId}}
+     * by the child watcher virtual thread.
+     */
+    record ChildWorkflowCompleted(
+            String eventId,
+            Instant timestamp,
+            String parentWorkflowId,
+            String childWorkflowId,
+            byte[] result
+    ) implements HistoryEvent {}
+
+    /**
+     * Child workflow failed. Written to {@code workflow-history:{parentWorkflowId}}
+     * by the child watcher virtual thread.
+     */
+    record ChildWorkflowFailed(
+            String eventId,
+            Instant timestamp,
+            String parentWorkflowId,
+            String childWorkflowId,
+            String errorType,
+            String message
     ) implements HistoryEvent {}
 }
