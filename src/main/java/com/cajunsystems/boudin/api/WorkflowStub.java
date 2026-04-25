@@ -86,28 +86,13 @@ class WorkflowStub implements InvocationHandler {
         this.workflowId = wfId;
 
         String workflowType = workflowInterface.getSimpleName();
-        byte[] inputBytes = KryoSerializer.toBytes(args != null ? args : new Object[0]);
-
-        HistoryEvent.WorkflowStarted startedEvent = new HistoryEvent.WorkflowStarted(
-                UUID.randomUUID().toString(),
-                Instant.now(),
-                wfId,
-                workflowType,
-                options.taskQueue(),
-                inputBytes
-        );
-
-        // Atomic dual-tag append: workflow task queue + workflow history
         LogTag taskTag = LogTag.of("workflow-tasks", options.taskQueue());
         LogTag historyTag = LogTag.of("workflow-history", wfId);
-
-        log.info("Starting workflow {} (type={}, taskQueue={})",
-                wfId, workflowType, options.taskQueue());
-
-        // Subscribe BEFORE appending WorkflowStarted so we never miss WorkflowCompleted.
-        // A fast workflow may complete before a post-append subscription could register.
-        CompletableFuture<byte[]> resultFuture = new CompletableFuture<>();
+        LogView taskView = sharedLog.getView(taskTag);
         LogView historyView = sharedLog.getView(historyTag);
+
+        // Subscribe BEFORE any append so we never miss WorkflowCompleted
+        CompletableFuture<byte[]> resultFuture = new CompletableFuture<>();
         SharedLog.Subscription sub = historyView.subscribe(LogPosition.BEGINNING, entry -> {
             HistoryEvent event = HistorySerializer.INSTANCE.deserialize(entry.data());
             switch (event) {
@@ -120,13 +105,34 @@ class WorkflowStub implements InvocationHandler {
             }
         });
 
-        sharedLog.append(
-                AppendRequest.to(Set.of(taskTag, historyTag),
-                        HistorySerializer.INSTANCE.serialize(startedEvent))
-        ).join();
+        // Idempotency check: if this workflowId was already submitted, skip re-append.
+        // Note: narrow race window exists without CAS; acceptable for retry-based callers.
+        byte[] alreadyStarted = taskView.getValue("wf-started:" + wfId).join();
+        if (alreadyStarted == null) {
+            byte[] inputBytes = KryoSerializer.toBytes(args != null ? args : new Object[0]);
+            HistoryEvent.WorkflowStarted startedEvent = new HistoryEvent.WorkflowStarted(
+                    UUID.randomUUID().toString(),
+                    Instant.now(),
+                    wfId,
+                    workflowType,
+                    options.taskQueue(),
+                    inputBytes
+            );
+
+            log.info("Starting workflow {} (type={}, taskQueue={})", wfId, workflowType, options.taskQueue());
+
+            sharedLog.append(
+                    AppendRequest.to(Set.of(taskTag, historyTag),
+                            HistorySerializer.INSTANCE.serialize(startedEvent))
+            ).join();
+
+            taskView.setValue("wf-started:" + wfId, new byte[0]).join();
+        } else {
+            log.info("Workflow {} already started, waiting for completion", wfId);
+        }
 
         try {
-            byte[] resultBytes = resultFuture.join(); // blocks caller until workflow completes
+            byte[] resultBytes = resultFuture.join();
             if (method.getReturnType() == Void.TYPE || resultBytes == null || resultBytes.length == 0) {
                 return null;
             }
