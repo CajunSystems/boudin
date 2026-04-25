@@ -4,7 +4,7 @@
 
 - **Milestone:** 1 — Production-Ready Boudin
 - **Phase:** 3 — NIO Event Loop Infrastructure
-- **Plan:** 03-01 — BoudinEventLoop + HashedWheelTimer + Worker wiring
+- **Plan:** 03-02 — Route WorkflowRunner history events through event loop
 - **Status:** Planned, ready to execute
 
 ## Key Decisions
