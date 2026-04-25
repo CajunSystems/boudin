@@ -10,11 +10,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Subscribes to the {@code activity-tasks:{taskQueue}} log tag, executes activity
@@ -51,6 +58,8 @@ public class ActivityDispatcher {
     private final Set<String> scheduledActivityIds = ConcurrentHashMap.newKeySet();
 
     private SharedLog.Subscription liveSubscription;
+
+    private final ExecutorService vtExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     public ActivityDispatcher(String taskQueue, SharedLog sharedLog,
                                ActivityRegistry activityRegistry) {
@@ -98,11 +107,12 @@ public class ActivityDispatcher {
         });
     }
 
-    /** Stops subscriptions. In-flight virtual threads will finish naturally. */
+    /** Stops subscriptions and the timeout executor. In-flight virtual threads finish naturally. */
     public void stop() {
         if (liveSubscription != null) {
             try { liveSubscription.close(); } catch (Exception ignored) {}
         }
+        vtExecutor.shutdown();
     }
 
     // ── Private ───────────────────────────────────────────────────────────────
@@ -142,7 +152,10 @@ public class ActivityDispatcher {
                     scheduled.activityId(), attempt, maxAttempts,
                     scheduled.activityType(), scheduled.workflowId());
             try {
-                byte[] resultBytes = activityRegistry.invoke(scheduled.activityType(), scheduled.input());
+                long timeoutMs = scheduled.startToCloseTimeoutMs();
+                byte[] resultBytes = (timeoutMs > 0)
+                        ? invokeWithTimeout(scheduled, timeoutMs)
+                        : activityRegistry.invoke(scheduled.activityType(), scheduled.input());
 
                 HistoryEvent.ActivityCompleted completed = new HistoryEvent.ActivityCompleted(
                         UUID.randomUUID().toString(), Instant.now(),
@@ -156,9 +169,13 @@ public class ActivityDispatcher {
 
             } catch (Exception e) {
                 lastException = e;
-                log.warn("Activity {} attempt {}/{} failed for workflow {}: {}",
+                Throwable cause = (e instanceof CompletionException) ? e.getCause() : e;
+                boolean isTimeout = cause instanceof TimeoutException;
+                log.warn("Activity {} attempt {}/{} {} for workflow {}: {}",
                         scheduled.activityId(), attempt, maxAttempts,
-                        scheduled.workflowId(), e.getMessage());
+                        isTimeout ? "timed out" : "failed",
+                        scheduled.workflowId(),
+                        isTimeout ? scheduled.startToCloseTimeoutMs() + "ms" : e.getMessage());
                 if (attempt < maxAttempts) {
                     long backoffMs = (long) (initialIntervalMs * Math.pow(backoffCoefficient, attempt - 1));
                     try {
@@ -188,6 +205,29 @@ public class ActivityDispatcher {
             ).join();
         } catch (Exception appendEx) {
             log.error("Failed to append ActivityFailed for activity {}", scheduled.activityId(), appendEx);
+        }
+    }
+
+    private byte[] invokeWithTimeout(HistoryEvent.ActivityScheduled scheduled, long timeoutMs) {
+        CompletableFuture<byte[]> future = CompletableFuture.supplyAsync(
+                () -> {
+                    try {
+                        return activityRegistry.invoke(scheduled.activityType(), scheduled.input());
+                    } catch (RuntimeException e) {
+                        throw e;
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                },
+                vtExecutor
+        ).orTimeout(timeoutMs, TimeUnit.MILLISECONDS);
+        try {
+            return future.join();
+        } catch (CompletionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof TimeoutException) throw e; // CompletionException(TimeoutException) → handled by caller
+            if (cause instanceof RuntimeException re) throw re; // unwrap activity exception
+            throw e;
         }
     }
 
