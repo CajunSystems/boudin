@@ -4,7 +4,7 @@
 
 - **Milestone:** 1 — Production-Ready Boudin
 - **Phase:** 2 — Scalable Crash Recovery
-- **Plan:** 02-01 — WorkflowDispatcher KV active-set + WorkflowRunner callback
+- **Plan:** 02-02 — ActivityDispatcher Checkpoint + Idempotent Start + Tests
 - **Status:** Planned, ready to execute
 
 ## Key Decisions
