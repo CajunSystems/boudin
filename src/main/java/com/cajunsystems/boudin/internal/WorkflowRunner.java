@@ -152,6 +152,12 @@ public class WorkflowRunner {
             case HistoryEvent.TimerFired tf ->
                     context.deliverTimerFired(tf.timerId());
 
+            case HistoryEvent.ChildWorkflowCompleted cwc ->
+                    context.deliverChildWorkflowResult(cwc.childWorkflowId(), cwc.result());
+
+            case HistoryEvent.ChildWorkflowFailed cwf ->
+                    context.deliverChildWorkflowFailure(cwf.childWorkflowId(), cwf.errorType(), cwf.message());
+
             case HistoryEvent.WorkflowCompleted wc -> {
                 log.debug("WorkflowCompleted observed in history for {}", workflowId);
                 close();
