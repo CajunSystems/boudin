@@ -4,8 +4,8 @@
 
 - **Milestone:** 1 — Production-Ready Boudin
 - **Phase:** 4 — Timers & Workflow.sleep()
-- **Plan:** 04-01 — (to be planned)
-- **Status:** Phase 3 complete; Phase 4 needs planning
+- **Plan:** 04-01 — Workflow.sleep() end-to-end
+- **Status:** Planned, ready to execute
 
 ## Key Decisions
 
