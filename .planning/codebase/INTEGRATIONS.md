@@ -4,7 +4,7 @@
 
 The sole external system Boudin integrates with. Gumbo is the persistence, coordination, and delivery layer.
 
-**Dependency:** `com.cajunsystems:gumbo:main-SNAPSHOT` via JitPack
+**Dependency:** `com.github.CajunSystems:gumbo:0.2.0` via JitPack
 
 ### Log Tags Used
 
@@ -14,13 +14,21 @@ The sole external system Boudin integrates with. Gumbo is the persistence, coord
 | `workflow-history:{workflowId}` | `WorkflowStub`, `WorkflowThread`, `ActivityDispatcher`, `ActivityStub` | `WorkflowRunner`, `WorkflowStub` | Complete event history per workflow |
 | `activity-tasks:{taskQueue}` | `ActivityStub` | `ActivityDispatcher` | Activity invocation queue |
 
-### Key Gumbo APIs Used
+### Key Gumbo APIs Used (0.2.0)
 
 - `SharedLogService.open(SharedLogConfig)` — open log with persistence adapter
 - `SharedLog.append(AppendRequest)` — write events (single or multi-tag atomic)
-- `LogView.subscribeAll()` — historical + live tail subscription (used for crash recovery)
-- `LogView.subscribeTail()` — live events only subscription
-- `LogView.readAll()` — read all historical events (used in crash recovery scans)
+- `SharedLog.appendBatch(List<AppendRequest>)` — batch append (reduces sequencer RTTs)
+- `LogView.subscribe(from, listener)` — historical + live tail subscription
+- `LogView.subscribeTail(listener)` — live events only subscription (no backlog)
+- `LogView.readAll()` — read all historical events
+- `LogView.readFrom(position, max)` — O(log N) positional read
+- `LogView.readAfter(seqnum)` — delta reads for efficient catch-up
+- `LogView.getValue(key)` / `LogView.setValue(key, bytes)` — **NEW: per-tag KV store**
+- `LogView.getLatestSeqnum()` — O(1) tail position query
+- `TypedLogView<T>` — type-safe wrapper with Kryo serialization
+- `ExecutorEngine` — **NEW: stateless executor model** for crash-safe processing
+- `Executor<S>` — **NEW: pure fold function** (state + entry → new state → append results)
 
 ### Persistence Adapters (from Gumbo)
 

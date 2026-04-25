@@ -14,7 +14,7 @@
 
 | Dependency | Version | Purpose |
 |-----------|---------|---------|
-| **gumbo** (CajunSystems) | main-SNAPSHOT | Shared append-only log — the persistence and coordination layer |
+| **gumbo** (CajunSystems) | 0.2.0 | Shared append-only log — persistence, coordination, KV store, executors |
 | **Kryo** | (via gumbo) | Fast binary serialization for POJOs, generics, collections |
 | **SLF4J API** | 2.0.12 | Logging facade |
 | **Logback Classic** | 1.5.3 | SLF4J implementation |
