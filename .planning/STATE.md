@@ -3,9 +3,9 @@
 ## Current Position
 
 - **Milestone:** 1 — Production-Ready Boudin
-- **Phase:** 1 — Foundation & Correctness
-- **Plan:** 01-01 — Foundation & Correctness
-- **Status:** Complete
+- **Phase:** 2 — Scalable Crash Recovery
+- **Plan:** 02-01 — WorkflowDispatcher KV active-set + WorkflowRunner callback
+- **Status:** Planned, ready to execute
 
 ## Key Decisions
 
