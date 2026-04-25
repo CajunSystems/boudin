@@ -48,6 +48,14 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- Metrics — optional; consumers provide micrometer-core if they want metrics -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+            <version>1.12.5</version>
+            <optional>true</optional>
+        </dependency>
+
         <!-- Testing -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
