@@ -42,6 +42,7 @@ public class WorkflowDispatcher {
     private final WorkflowRegistry workflowRegistry;
     private final BoudinEventLoop eventLoop;
     private final HashedWheelTimer timerWheel;
+    private final BoudinMetrics metrics;
 
     private LogView taskView;
     private final Set<String> knownWorkflowIds = ConcurrentHashMap.newKeySet();
@@ -53,12 +54,13 @@ public class WorkflowDispatcher {
 
     public WorkflowDispatcher(String taskQueue, SharedLog sharedLog,
                                WorkflowRegistry workflowRegistry, BoudinEventLoop eventLoop,
-                               HashedWheelTimer timerWheel) {
+                               HashedWheelTimer timerWheel, BoudinMetrics metrics) {
         this.taskQueue = taskQueue;
         this.sharedLog = sharedLog;
         this.workflowRegistry = workflowRegistry;
         this.eventLoop = eventLoop;
         this.timerWheel = timerWheel;
+        this.metrics = metrics;
     }
 
     public void start() {
@@ -156,8 +158,9 @@ public class WorkflowDispatcher {
                 workflowId, taskQueue, sharedLog, workflowRegistry,
                 history, lastSeqnum,
                 () -> onWorkflowComplete(workflowId),
-                eventLoop, timerWheel);
+                eventLoop, timerWheel, metrics);
         runners.put(workflowId, runner);
+        metrics.pendingWorkflows().incrementAndGet();
         runner.start(startedEvent);
     }
 
@@ -195,13 +198,15 @@ public class WorkflowDispatcher {
                 ws.workflowId(), taskQueue, sharedLog, workflowRegistry,
                 history, lastSeqnum,
                 () -> onWorkflowComplete(ws.workflowId()),
-                eventLoop, timerWheel);
+                eventLoop, timerWheel, metrics);
         runners.put(ws.workflowId(), runner);
+        metrics.pendingWorkflows().incrementAndGet();
         runner.start(ws);
     }
 
     private void onWorkflowComplete(String workflowId) {
         runners.remove(workflowId);
+        metrics.pendingWorkflows().decrementAndGet();
         removeFromActiveSet(workflowId);
         log.debug("WorkflowDispatcher[{}]: workflow {} removed from active set", taskQueue, workflowId);
     }

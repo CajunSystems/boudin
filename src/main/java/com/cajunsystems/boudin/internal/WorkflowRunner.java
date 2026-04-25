@@ -49,6 +49,7 @@ public class WorkflowRunner {
     private final Runnable onComplete;
     private final BoudinEventLoop eventLoop;
     private final HashedWheelTimer timerWheel;
+    private final BoudinMetrics metrics;
 
     private WorkflowContext context;
     private WorkflowThread workflowThread;
@@ -63,7 +64,8 @@ public class WorkflowRunner {
                           long lastHistorySeqnum,
                           Runnable onComplete,
                           BoudinEventLoop eventLoop,
-                          HashedWheelTimer timerWheel) {
+                          HashedWheelTimer timerWheel,
+                          BoudinMetrics metrics) {
         this.workflowId = workflowId;
         this.taskQueue = taskQueue;
         this.sharedLog = sharedLog;
@@ -73,6 +75,7 @@ public class WorkflowRunner {
         this.onComplete = onComplete;
         this.eventLoop = eventLoop;
         this.timerWheel = timerWheel;
+        this.metrics = metrics;
     }
 
     /**
@@ -122,7 +125,7 @@ public class WorkflowRunner {
         replayHistoricalSignals(impl, workflowType);
 
         // Start the workflow virtual thread
-        workflowThread = new WorkflowThread(context, impl, workflowMethod, startedEvent.input());
+        workflowThread = new WorkflowThread(context, impl, workflowMethod, startedEvent.input(), metrics);
         workflowThread.start();
 
         log.info("Started workflow {} (type={}, replay={})",

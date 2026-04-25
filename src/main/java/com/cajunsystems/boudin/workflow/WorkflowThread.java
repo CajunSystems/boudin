@@ -2,6 +2,7 @@ package com.cajunsystems.boudin.workflow;
 
 import com.cajunsystems.boudin.history.HistoryEvent;
 import com.cajunsystems.boudin.history.HistorySerializer;
+import com.cajunsystems.boudin.internal.BoudinMetrics;
 import com.cajunsystems.boudin.serialization.KryoSerializer;
 import com.cajunsystems.gumbo.core.AppendRequest;
 import com.cajunsystems.gumbo.core.LogTag;
@@ -46,14 +47,16 @@ public class WorkflowThread {
     private final Object workflowImpl;
     private final Method workflowMethod;
     private final byte[] inputBytes;
+    private final BoudinMetrics metrics;
     private final Thread thread;
 
     public WorkflowThread(WorkflowContext context, Object workflowImpl,
-                          Method workflowMethod, byte[] inputBytes) {
+                          Method workflowMethod, byte[] inputBytes, BoudinMetrics metrics) {
         this.context = context;
         this.workflowImpl = workflowImpl;
         this.workflowMethod = workflowMethod;
         this.inputBytes = inputBytes;
+        this.metrics = metrics;
         this.thread = Thread.ofVirtual()
                 .name("boudin-workflow-" + context.workflowId)
                 .unstarted(this::run);
@@ -83,6 +86,8 @@ public class WorkflowThread {
 
     private void run() {
         CURRENT_CONTEXT.set(context);
+        long startNs = System.nanoTime();
+        metrics.workflowStarted(context.workflowType);
         try {
             // Deserialize args and invoke the @WorkflowMethod
             Object[] args = KryoSerializer.fromBytes(inputBytes);
@@ -95,14 +100,17 @@ public class WorkflowThread {
                     : KryoSerializer.toBytes(result);
 
             appendCompleted(resultBytes);
+            metrics.workflowCompleted(context.workflowType, System.nanoTime() - startNs);
             context.completionFuture.complete(resultBytes);
 
         } catch (java.lang.reflect.InvocationTargetException ite) {
             Throwable cause = ite.getCause() != null ? ite.getCause() : ite;
             appendFailed(cause);
+            metrics.workflowFailed(context.workflowType, System.nanoTime() - startNs);
             context.completionFuture.completeExceptionally(cause);
         } catch (Exception e) {
             appendFailed(e);
+            metrics.workflowFailed(context.workflowType, System.nanoTime() - startNs);
             context.completionFuture.completeExceptionally(e);
         } finally {
             CURRENT_CONTEXT.remove();

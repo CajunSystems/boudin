@@ -3,10 +3,13 @@ package com.cajunsystems.boudin.api;
 import com.cajunsystems.boudin.internal.ActivityDispatcher;
 import com.cajunsystems.boudin.internal.ActivityRegistry;
 import com.cajunsystems.boudin.internal.BoudinEventLoop;
+import com.cajunsystems.boudin.internal.BoudinMetrics;
 import com.cajunsystems.boudin.internal.HashedWheelTimer;
 import com.cajunsystems.boudin.internal.WorkflowDispatcher;
 import com.cajunsystems.boudin.internal.WorkflowRegistry;
 import com.cajunsystems.gumbo.api.SharedLog;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -64,8 +67,12 @@ public class Worker implements AutoCloseable {
         this.activityRegistry = new ActivityRegistry();
         this.eventLoop = new BoudinEventLoop(builder.taskQueue);
         this.timerWheel = new HashedWheelTimer(eventLoop);
-        this.workflowDispatcher = new WorkflowDispatcher(taskQueue, sharedLog, workflowRegistry, eventLoop, timerWheel);
-        this.activityDispatcher = new ActivityDispatcher(taskQueue, sharedLog, activityRegistry);
+        MeterRegistry effectiveRegistry = builder.metricsRegistry != null
+                ? builder.metricsRegistry
+                : new SimpleMeterRegistry();
+        BoudinMetrics metrics = new BoudinMetrics(effectiveRegistry, this.taskQueue);
+        this.workflowDispatcher = new WorkflowDispatcher(taskQueue, sharedLog, workflowRegistry, eventLoop, timerWheel, metrics);
+        this.activityDispatcher = new ActivityDispatcher(taskQueue, sharedLog, activityRegistry, metrics);
     }
 
     /**
@@ -139,6 +146,7 @@ public class Worker implements AutoCloseable {
     public static final class Builder {
         private String taskQueue;
         private SharedLog sharedLog;
+        private MeterRegistry metricsRegistry;  // null = default SimpleMeterRegistry
 
         private Builder() {}
 
@@ -149,6 +157,11 @@ public class Worker implements AutoCloseable {
 
         public Builder sharedLog(SharedLog sharedLog) {
             this.sharedLog = sharedLog;
+            return this;
+        }
+
+        public Builder metricsRegistry(MeterRegistry registry) {
+            this.metricsRegistry = registry;
             return this;
         }
 

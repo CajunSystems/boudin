@@ -51,6 +51,7 @@ public class ActivityDispatcher {
     private final String taskQueue;
     private final SharedLog sharedLog;
     private final ActivityRegistry activityRegistry;
+    private final BoudinMetrics metrics;
 
     private LogView taskView;
 
@@ -62,10 +63,11 @@ public class ActivityDispatcher {
     private final ExecutorService vtExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     public ActivityDispatcher(String taskQueue, SharedLog sharedLog,
-                               ActivityRegistry activityRegistry) {
+                               ActivityRegistry activityRegistry, BoudinMetrics metrics) {
         this.taskQueue = taskQueue;
         this.sharedLog = sharedLog;
         this.activityRegistry = activityRegistry;
+        this.metrics = metrics;
     }
 
     public void start() {
