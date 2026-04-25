@@ -3,9 +3,9 @@
 ## Current Position
 
 - **Milestone:** 1 — Production-Ready Boudin
-- **Phase:** 3 — NIO Event Loop Infrastructure
-- **Plan:** 03-02 — Route WorkflowRunner history events through event loop
-- **Status:** Planned, ready to execute
+- **Phase:** 4 — Timers & Workflow.sleep()
+- **Plan:** 04-01 — (to be planned)
+- **Status:** Phase 3 complete; Phase 4 needs planning
 
 ## Key Decisions
 
