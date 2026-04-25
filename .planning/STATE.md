@@ -2,10 +2,10 @@
 
 ## Current Position
 
-- **Milestone:** 1 — Production-Ready Boudin
-- **Phase:** 8 — Document and Version Bump
-- **Plan:** 08-01 — Not started
-- **Status:** Phase 8 planned (1 plan), ready to execute 08-01
+- **Milestone:** 1 — Production-Ready Boudin (Complete)
+- **Phase:** 8 — Document and Version Bump (Complete)
+- **Plan:** 08-01 — Complete
+- **Status:** Phase 8 complete; Milestone 1 complete and released as 0.1.0
 
 ## Key Decisions
 
