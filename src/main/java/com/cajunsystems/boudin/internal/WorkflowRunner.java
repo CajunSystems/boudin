@@ -13,6 +13,8 @@ import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Manages the lifecycle of a single workflow instance.
@@ -47,6 +49,7 @@ public class WorkflowRunner {
     private WorkflowContext context;
     private WorkflowThread workflowThread;
     private SharedLog.Subscription historySubscription;
+    private final Set<Long> processedEventSeqnums = ConcurrentHashMap.newKeySet();
 
     public WorkflowRunner(String workflowId,
                           String taskQueue,
@@ -97,6 +100,7 @@ public class WorkflowRunner {
         historySubscription = historyView.subscribe(
                 new LogPosition(subscribeFrom),
                 entry -> onHistoryEvent(
+                        entry.seqnum(),
                         HistorySerializer.INSTANCE.deserialize(entry.data()), impl, workflowType)
         );
 
@@ -114,7 +118,8 @@ public class WorkflowRunner {
     }
 
     /** Delivers a live history event to the running workflow context. */
-    private void onHistoryEvent(HistoryEvent event, Object impl, String workflowType) {
+    private void onHistoryEvent(long seqnum, HistoryEvent event, Object impl, String workflowType) {
+        if (!processedEventSeqnums.add(seqnum)) return;
         switch (event) {
             case HistoryEvent.ActivityCompleted ac ->
                     context.deliverActivityResult(ac.activityId(), ac.result());
