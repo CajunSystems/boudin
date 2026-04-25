@@ -4,8 +4,8 @@
 
 - **Milestone:** 1 — Production-Ready Boudin
 - **Phase:** 5 — Activity Enforcement
-- **Plan:** 05-01 — Complete
-- **Status:** Plan 05-02 ready to execute (timeout enforcement)
+- **Plan:** 05-02 — Complete
+- **Status:** Phase 5 complete, ready for Phase 6
 
 ## Key Decisions
 
