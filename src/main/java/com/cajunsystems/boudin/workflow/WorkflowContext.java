@@ -120,6 +120,11 @@ public class WorkflowContext {
         // Virtual thread parks here — cheap because virtual threads are unmounted during join()
         try {
             return future.join();
+        } catch (java.util.concurrent.CompletionException e) {
+            // Unwrap so workflow code can catch ActivityFailureException directly
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException re) throw re;
+            throw e;
         } finally {
             pendingActivities.remove(activityId);
         }
