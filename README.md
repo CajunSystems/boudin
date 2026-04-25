@@ -27,6 +27,9 @@ Write ordinary Java methods. Get automatic durability, crash recovery, activity 
   - [WorkflowClient](#workflowclient)
   - [Workflow (static facade)](#workflow-static-facade)
   - [WorkflowOptions / ActivityOptions](#workflowoptions--activityoptions)
+  - [Durable Timers](#durable-timers)
+  - [Child Workflows](#child-workflows)
+  - [Observability](#observability)
 - [Package Structure](#package-structure)
 - [Building](#building)
 
@@ -41,6 +44,8 @@ Write ordinary Java methods. Get automatic durability, crash recovery, activity 
 | **Signal** | An asynchronous message sent to a running workflow that can update its internal state and unblock `Workflow.await()`. |
 | **Replay** | On crash recovery the workflow method re-executes from scratch, but `ActivityStub` returns cached results from history instead of scheduling new work. The result is identical to the original run. |
 | **Task Queue** | A named channel. Workers poll a queue for workflow tasks and activity tasks. A workflow and its activities can target the same queue or different queues. |
+| **Timer** | A durable delay created by `Workflow.sleep(Duration)`. The timer survives crashes — if the process restarts mid-sleep, the timer is re-scheduled for the remaining duration. |
+| **Child Workflow** | A workflow started from within another workflow. The parent blocks until the child completes. Results and failures are propagated through the parent's history. |
 
 ---
 
@@ -64,15 +69,18 @@ When an activity is scheduled, a single atomic append writes the same entry to *
 
 ```
 HistoryEvent (sealed interface)
-├── WorkflowStarted     (workflowId, workflowType, taskQueue, input: byte[])
-├── WorkflowCompleted   (workflowId, result: byte[])
-├── WorkflowFailed      (workflowId, errorType, message)
-├── ActivityScheduled   (workflowId, activityId, activityType, taskQueue, input: byte[])
-├── ActivityCompleted   (workflowId, activityId, result: byte[])
-├── ActivityFailed      (workflowId, activityId, errorType, message)
-├── SignalReceived      (workflowId, signalName, payload: byte[])
-├── TimerStarted        (workflowId, timerId, durationMillis)
-└── TimerFired          (workflowId, timerId)
+├── WorkflowStarted          (workflowId, workflowType, taskQueue, input: byte[])
+├── WorkflowCompleted        (workflowId, result: byte[])
+├── WorkflowFailed           (workflowId, errorType, message)
+├── ActivityScheduled        (workflowId, activityId, activityType, taskQueue, input, retryPolicy)
+├── ActivityCompleted        (workflowId, activityId, result: byte[])
+├── ActivityFailed           (workflowId, activityId, errorType, message)
+├── SignalReceived           (workflowId, signalName, payload: byte[])
+├── TimerStarted             (workflowId, timerId, durationMillis)
+├── TimerFired               (workflowId, timerId)
+├── ChildWorkflowStarted     (parentWorkflowId, childWorkflowId, childWorkflowType, taskQueue, input)
+├── ChildWorkflowCompleted   (parentWorkflowId, childWorkflowId, result: byte[])
+└── ChildWorkflowFailed      (parentWorkflowId, childWorkflowId, errorType, message)
 ```
 
 All events — including domain objects embedded in `input`, `result`, and `payload` fields — are serialized with **Kryo**. Arbitrary POJOs, generics, nested objects, and collections are supported without annotations.
@@ -307,6 +315,15 @@ All methods below may only be called from within a running workflow method (on t
 MyActivities activities = Workflow.newActivityStub(MyActivities.class);
 MyActivities activities = Workflow.newActivityStub(MyActivities.class, ActivityOptions.defaults());
 
+// Durable sleep — appends TimerStarted; parks virtual thread; resumes after duration
+// Survives crash: if the process restarts mid-sleep, the remaining duration is re-scheduled
+Workflow.sleep(Duration.ofMinutes(5));
+
+// Create a typed child workflow stub (safe to store as a field or call inline)
+ChildWorkflow child = Workflow.newChildWorkflowStub(ChildWorkflow.class);
+ChildWorkflow child = Workflow.newChildWorkflowStub(ChildWorkflow.class,
+        ChildWorkflowOptions.newBuilder().taskQueue("other-queue").build());
+
 // Block until condition is true (re-evaluated after each signal)
 Workflow.await(() -> this.approved);
 
@@ -328,11 +345,140 @@ WorkflowOptions options = WorkflowOptions.newBuilder()
         .build();
 
 ActivityOptions actOpts = ActivityOptions.newBuilder()
-        .taskQueue("heavy-tasks")      // optional; defaults to workflow's queue
-        .startToCloseTimeout(Duration.ofSeconds(30))  // default: 10s
-        .maxAttempts(3)                // default: 1
+        .taskQueue("heavy-tasks")               // optional; defaults to workflow's queue
+        .startToCloseTimeout(Duration.ofSeconds(30))  // default: 10s per attempt
+        .scheduleToStartTimeout(Duration.ofSeconds(60)) // default: none; max wait before execution begins
+        .maxAttempts(3)                         // default: 1
+        .initialInterval(Duration.ofSeconds(2)) // default: 1s; delay before first retry
+        .backoffCoefficient(1.5)                // default: 2.0; multiplier per subsequent retry
         .build();
 ```
+
+Retry delay follows exponential backoff: `delay(n) = initialInterval × backoffCoefficient^(n-1)`.
+With the defaults (1s interval, coefficient 2.0): attempt 2 waits 1s, attempt 3 waits 2s, attempt 4 waits 4s.
+Set `backoffCoefficient(1.0)` for a constant retry interval.
+
+### Durable Timers
+
+`Workflow.sleep(Duration)` appends a `TimerStarted` event to the workflow's history, schedules the
+timer through the `HashedWheelTimer`, and parks the workflow virtual thread. When the timer fires,
+`TimerFired` is appended and the virtual thread resumes.
+
+```java
+public class ReminderWorkflowImpl implements ReminderWorkflow {
+    @Override
+    public void run(String userId) {
+        // Send an immediate notification
+        activities.notify(userId, "Your trial started!");
+
+        // Wait 7 days durably (survives process restart)
+        Workflow.sleep(Duration.ofDays(7));
+
+        // Send a follow-up notification
+        activities.notify(userId, "Your trial ends tomorrow!");
+    }
+}
+```
+
+On crash recovery, if the timer has not yet fired, Boudin calculates the remaining duration
+from the `TimerStarted` timestamp and re-schedules it. If the timer already fired before the
+crash, `TimerFired` is in the history and the sleep returns immediately during replay.
+
+### Child Workflows
+
+A workflow can start another workflow and block until it completes using
+`Workflow.newChildWorkflowStub()`. Child workflows run independently — they have their own
+workflow ID, history, and task queue.
+
+```java
+@WorkflowInterface
+public interface ValidationWorkflow {
+    @WorkflowMethod
+    ValidationResult validate(Order order);
+}
+
+public class OrderWorkflowImpl implements OrderWorkflow {
+
+    // Child workflow stub — inherits parent's task queue by default
+    private final ValidationWorkflow validator =
+            Workflow.newChildWorkflowStub(ValidationWorkflow.class);
+
+    // To target a different task queue:
+    // Workflow.newChildWorkflowStub(ValidationWorkflow.class,
+    //     ChildWorkflowOptions.newBuilder().taskQueue("validators").build());
+
+    @Override
+    public OrderResult process(Order order) {
+        ValidationResult v = validator.validate(order);  // blocks until child completes
+        if (!v.isValid()) return OrderResult.rejected(v.reason());
+        // ...
+    }
+}
+```
+
+If the child workflow fails, `ChildWorkflowFailureException` is thrown:
+
+```java
+try {
+    ValidationResult v = validator.validate(order);
+} catch (ChildWorkflowFailureException e) {
+    log.warn("Validation failed: {} — {}", e.errorType(), e.getMessage());
+    return OrderResult.rejected("validation-error");
+}
+```
+
+The child workflow must be registered on a worker that listens to the target task queue.
+Both parent and child implementations can be registered on the same `Worker` instance.
+
+### Observability
+
+#### Metrics
+
+Boudin integrates with [Micrometer](https://micrometer.io/). Pass a `MeterRegistry` to the
+worker builder to enable metrics:
+
+```java
+MeterRegistry registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+
+Worker worker = Worker.newBuilder()
+        .taskQueue("orders")
+        .sharedLog(sharedLog)
+        .metricsRegistry(registry)   // opt-in; omit to disable metrics
+        .build();
+```
+
+Metrics recorded automatically:
+
+| Metric | Type | Tags | Description |
+|--------|------|------|-------------|
+| `boudin.workflow.started` | Counter | `workflowType` | Incremented when a workflow begins executing |
+| `boudin.workflow.completed` | Counter | `workflowType` | Incremented on successful completion |
+| `boudin.workflow.failed` | Counter | `workflowType` | Incremented when workflow throws |
+| `boudin.workflow.duration` | Timer | `workflowType` | Wall-clock execution time |
+| `boudin.activity.started` | Counter | `activityType` | Incremented per scheduling event |
+| `boudin.activity.completed` | Counter | `activityType` | Incremented on successful execution |
+| `boudin.activity.failed` | Counter | `activityType` | Incremented when all retries are exhausted |
+| `boudin.activity.retries` | Counter | `activityType` | Incremented for each retry attempt |
+| `boudin.activity.duration` | Timer | `activityType` | Total time from scheduling to completion/failure |
+| `boudin.worker.pending_workflows` | Gauge | `taskQueue` | Currently executing workflow instances |
+| `boudin.worker.pending_activities` | Gauge | `taskQueue` | Currently executing activity instances |
+
+`micrometer-core` is declared as an optional Maven dependency — add it explicitly if you want
+to use a specific registry (Prometheus, Datadog, InfluxDB, etc.).
+
+#### MDC Context
+
+Boudin sets SLF4J MDC keys automatically during execution so that all log statements within a
+workflow or activity carry context:
+
+| Key | Value | Set during |
+|-----|-------|-----------|
+| `workflowId` | The workflow instance ID | Workflow virtual thread |
+| `workflowType` | The `@WorkflowInterface` simple name | Workflow virtual thread |
+| `activityId` | The unique activity invocation ID | Activity execution |
+| `activityType` | `"InterfaceName#methodName"` | Activity execution |
+
+These keys are cleared automatically when the workflow/activity finishes.
 
 ---
 
@@ -342,15 +488,17 @@ ActivityOptions actOpts = ActivityOptions.newBuilder()
 com.cajunsystems.boudin
 ├── annotation/         @WorkflowInterface, @WorkflowMethod, @SignalMethod,
 │                       @QueryMethod, @ActivityInterface, @ActivityMethod
-├── api/                WorkflowClient, WorkflowStub, Worker,
+├── api/                Worker, WorkflowClient, WorkflowStub, SignalOnlyStub,
 │                       WorkflowOptions, WorkflowFailureException
 ├── activity/           ActivityStub (InvocationHandler), ActivityOptions,
 │                       ActivityFailureException
-├── history/            HistoryEvent (sealed hierarchy), HistorySerializer
+├── history/            HistoryEvent (sealed hierarchy, 13 record types), HistorySerializer
 ├── internal/           WorkflowDispatcher, ActivityDispatcher, WorkflowRunner,
-│                       WorkflowRegistry, ActivityRegistry, ReplayState
+│                       WorkflowRegistry, ActivityRegistry, ReplayState,
+│                       BoudinEventLoop, HashedWheelTimer, BoudinMetrics
 ├── serialization/      KryoSerializer (thread-safe Kryo pool)
-└── workflow/           Workflow (static facade), WorkflowContext, WorkflowThread
+└── workflow/           Workflow (static facade), WorkflowContext, WorkflowThread,
+                        ChildWorkflowOptions, ChildWorkflowFailureException
 ```
 
 **Data flow summary:**
@@ -404,7 +552,7 @@ Boudin requires **Java 21** and pulls Gumbo via [JitPack](https://jitpack.io).
 <dependency>
     <groupId>com.cajunsystems</groupId>
     <artifactId>boudin</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.1.0</version>
 </dependency>
 ```
 
