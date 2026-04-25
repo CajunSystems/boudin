@@ -39,6 +39,9 @@ public class ReplayState {
     /** Pre-scanned map of timerId → true (fired) from the loaded history. */
     private final Map<String, Boolean> firedTimers = new HashMap<>();
 
+    /** Pre-scanned map of timerId → TimerStarted event (for in-progress crash recovery). */
+    private final Map<String, HistoryEvent.TimerStarted> startedTimers = new HashMap<>();
+
     /** The seqnum of the last LogEntry in the loaded history (0 if history is empty). */
     private final long lastHistorySeqnum;
 
@@ -71,6 +74,8 @@ public class ReplayState {
             switch (event) {
                 case HistoryEvent.ActivityCompleted ac ->
                         completedActivities.put(ac.activityId(), ac.result());
+                case HistoryEvent.TimerStarted ts ->
+                        startedTimers.put(ts.timerId(), ts);
                 case HistoryEvent.TimerFired tf ->
                         firedTimers.put(tf.timerId(), true);
                 default -> {} // other events not needed for replay cache
@@ -118,6 +123,16 @@ public class ReplayState {
      */
     public boolean hasTimerFired(String timerId) {
         return firedTimers.getOrDefault(timerId, false);
+    }
+
+    /**
+     * Returns the {@link HistoryEvent.TimerStarted} event for the given timer ID if it was
+     * started in a prior execution but never fired (in-progress crash recovery).
+     * Returns null if the timer was never started, or has already fired.
+     */
+    public HistoryEvent.TimerStarted getTimerStarted(String timerId) {
+        if (firedTimers.containsKey(timerId)) return null; // already fired
+        return startedTimers.get(timerId);
     }
 
     /**
