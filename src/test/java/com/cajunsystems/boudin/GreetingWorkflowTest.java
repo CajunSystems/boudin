@@ -18,8 +18,11 @@ import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 /**
  * End-to-end integration tests for the Boudin workflow framework.
@@ -85,13 +88,14 @@ class GreetingWorkflowTest {
     }
 
     public static class WaitingWorkflowImpl implements WaitingWorkflow {
+        static final AtomicBoolean reachedAwait = new AtomicBoolean(false);
         private volatile String approvedLocale = null;
         private final GreetingActivities activities =
                 Workflow.newActivityStub(GreetingActivities.class);
 
         @Override
         public String run(String name) {
-            // Wait until a signal provides the locale
+            reachedAwait.set(true);
             Workflow.await(() -> approvedLocale != null);
             return activities.formatGreeting(name, approvedLocale);
         }
@@ -109,6 +113,7 @@ class GreetingWorkflowTest {
 
     @BeforeEach
     void setUp() throws Exception {
+        WaitingWorkflowImpl.reachedAwait.set(false);
         SharedLogConfig config = SharedLogConfig.builder()
                 .persistenceAdapter(new InMemoryPersistenceAdapter())
                 .build();
@@ -172,8 +177,8 @@ class GreetingWorkflowTest {
         CompletableFuture<String> resultFuture = CompletableFuture.supplyAsync(
                 () -> stub.run("Monde"));
 
-        // Give the workflow a moment to start and reach the await
-        try { Thread.sleep(200); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        // Wait until the workflow virtual thread has started and reached Workflow.await()
+        await().atMost(5, SECONDS).until(WaitingWorkflowImpl.reachedAwait::get);
 
         // Send the signal (locale = "fr")
         stub.approve("fr");
