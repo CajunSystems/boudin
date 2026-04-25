@@ -4,8 +4,8 @@
 
 - **Milestone:** 1 — Production-Ready Boudin
 - **Phase:** 1 — Foundation & Correctness
-- **Plan:** None yet
-- **Status:** Not started
+- **Plan:** 01-01 — Foundation & Correctness
+- **Status:** Planned, ready to execute
 
 ## Key Decisions
 
