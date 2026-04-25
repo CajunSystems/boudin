@@ -3,9 +3,9 @@
 ## Current Position
 
 - **Milestone:** 1 — Production-Ready Boudin
-- **Phase:** 4 — Timers & Workflow.sleep()
-- **Plan:** 04-01 — Complete
-- **Status:** Phase 4 complete, ready for Phase 5
+- **Phase:** 5 — Activity Enforcement
+- **Plan:** 05-01 — Retry policy expansion and retry loop
+- **Status:** Planned, ready to execute
 
 ## Key Decisions
 
