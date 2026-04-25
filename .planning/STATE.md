@@ -5,7 +5,7 @@
 - **Milestone:** 1 — Production-Ready Boudin
 - **Phase:** 1 — Foundation & Correctness
 - **Plan:** 01-01 — Foundation & Correctness
-- **Status:** Planned, ready to execute
+- **Status:** Complete
 
 ## Key Decisions
 
@@ -17,10 +17,6 @@
 
 ## Active Issues
 
-- Signal delivery not idempotent (Phase 1)
-- Pending activities map never pruned (Phase 1)
-- No registration validation (Phase 1)
-- Thread.sleep() in tests is fragile (Phase 1)
 - Unbounded startup log scan (Phase 2)
 
 ## Notes
