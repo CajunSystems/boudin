@@ -46,6 +46,8 @@ public class WorkflowRunner {
     private final List<HistoryEvent> existingHistory;
     private final long lastHistorySeqnum;
 
+    private final Runnable onComplete;
+
     private WorkflowContext context;
     private WorkflowThread workflowThread;
     private SharedLog.Subscription historySubscription;
@@ -56,13 +58,15 @@ public class WorkflowRunner {
                           SharedLog sharedLog,
                           WorkflowRegistry workflowRegistry,
                           List<HistoryEvent> existingHistory,
-                          long lastHistorySeqnum) {
+                          long lastHistorySeqnum,
+                          Runnable onComplete) {
         this.workflowId = workflowId;
         this.taskQueue = taskQueue;
         this.sharedLog = sharedLog;
         this.workflowRegistry = workflowRegistry;
         this.existingHistory = existingHistory;
         this.lastHistorySeqnum = lastHistorySeqnum;
+        this.onComplete = onComplete;
     }
 
     /**
@@ -141,14 +145,15 @@ public class WorkflowRunner {
                     context.deliverTimerFired(tf.timerId());
 
             case HistoryEvent.WorkflowCompleted wc -> {
-                // The workflow thread appended this itself; nothing to do here.
                 log.debug("WorkflowCompleted observed in history for {}", workflowId);
                 close();
+                if (onComplete != null) onComplete.run();
             }
 
             case HistoryEvent.WorkflowFailed wf -> {
                 log.debug("WorkflowFailed observed in history for {}", workflowId);
                 close();
+                if (onComplete != null) onComplete.run();
             }
 
             // WorkflowStarted, ActivityScheduled — informational; no action needed
