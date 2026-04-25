@@ -8,6 +8,7 @@ import com.cajunsystems.gumbo.core.AppendRequest;
 import com.cajunsystems.gumbo.core.LogTag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 import java.lang.reflect.Method;
 import java.time.Instant;
@@ -86,6 +87,8 @@ public class WorkflowThread {
 
     private void run() {
         CURRENT_CONTEXT.set(context);
+        MDC.put("workflowId", context.workflowId);
+        MDC.put("workflowType", context.workflowType);
         long startNs = System.nanoTime();
         metrics.workflowStarted(context.workflowType);
         try {
@@ -113,6 +116,8 @@ public class WorkflowThread {
             metrics.workflowFailed(context.workflowType, System.nanoTime() - startNs);
             context.completionFuture.completeExceptionally(e);
         } finally {
+            MDC.remove("workflowId");
+            MDC.remove("workflowType");
             CURRENT_CONTEXT.remove();
         }
     }

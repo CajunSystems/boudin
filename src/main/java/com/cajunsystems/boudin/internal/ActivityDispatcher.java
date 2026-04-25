@@ -8,6 +8,7 @@ import com.cajunsystems.gumbo.core.AppendRequest;
 import com.cajunsystems.gumbo.core.LogTag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 import java.nio.ByteBuffer;
 import java.time.Duration;
@@ -161,6 +162,8 @@ public class ActivityDispatcher {
         double backoffCoefficient = scheduled.backoffCoefficient();
         String activityType = scheduled.activityType();
 
+        MDC.put("activityId", scheduled.activityId());
+        MDC.put("activityType", scheduled.activityType());
         metrics.activityStarted(activityType);
         metrics.pendingActivities().incrementAndGet();
         long activityStartNs = System.nanoTime();
@@ -231,6 +234,8 @@ public class ActivityDispatcher {
             }
         } finally {
             metrics.pendingActivities().decrementAndGet();
+            MDC.remove("activityId");
+            MDC.remove("activityType");
         }
     }
 
