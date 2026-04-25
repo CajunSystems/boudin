@@ -2,6 +2,8 @@ package com.cajunsystems.boudin.api;
 
 import com.cajunsystems.boudin.internal.ActivityDispatcher;
 import com.cajunsystems.boudin.internal.ActivityRegistry;
+import com.cajunsystems.boudin.internal.BoudinEventLoop;
+import com.cajunsystems.boudin.internal.HashedWheelTimer;
 import com.cajunsystems.boudin.internal.WorkflowDispatcher;
 import com.cajunsystems.boudin.internal.WorkflowRegistry;
 import com.cajunsystems.gumbo.api.SharedLog;
@@ -48,6 +50,8 @@ public class Worker implements AutoCloseable {
     private final SharedLog sharedLog;
     private final WorkflowRegistry workflowRegistry;
     private final ActivityRegistry activityRegistry;
+    private final BoudinEventLoop eventLoop;
+    private final HashedWheelTimer timerWheel;
     private final WorkflowDispatcher workflowDispatcher;
     private final ActivityDispatcher activityDispatcher;
 
@@ -58,6 +62,8 @@ public class Worker implements AutoCloseable {
         this.sharedLog = Objects.requireNonNull(builder.sharedLog, "sharedLog is required");
         this.workflowRegistry = new WorkflowRegistry();
         this.activityRegistry = new ActivityRegistry();
+        this.eventLoop = new BoudinEventLoop(builder.taskQueue);
+        this.timerWheel = new HashedWheelTimer(eventLoop);
         this.workflowDispatcher = new WorkflowDispatcher(taskQueue, sharedLog, workflowRegistry);
         this.activityDispatcher = new ActivityDispatcher(taskQueue, sharedLog, activityRegistry);
     }
@@ -117,11 +123,14 @@ public class Worker implements AutoCloseable {
         log.info("Stopping Worker on task queue '{}'", taskQueue);
         workflowDispatcher.stop();
         activityDispatcher.stop();
+        eventLoop.close(); // drain after subscriptions are closed
     }
 
-    public String taskQueue() {
-        return taskQueue;
-    }
+    public String taskQueue() { return taskQueue; }
+
+    public BoudinEventLoop eventLoop() { return eventLoop; }
+
+    public HashedWheelTimer timerWheel() { return timerWheel; }
 
     public static Builder newBuilder() {
         return new Builder();
