@@ -124,6 +124,20 @@ Evolve Boudin from a proof-of-concept into a production-grade durable workflow e
 
 ---
 
+### Phase 8: Document and Version Bump
+
+**Goal:** Document all changes delivered in Milestone 1 and bump the project version to 0.1.0.
+
+**Scope:**
+- Update `README.md` — comprehensive developer guide covering all APIs added in Milestone 1: activities (options, retries, timeouts), `Workflow.sleep()`, child workflows, observability (`Worker.metricsRegistry()`, MDC)
+- Update `pom.xml` version from `0.1.0-SNAPSHOT` to `0.1.0`
+- Add `CHANGELOG.md` — record all features delivered in Milestone 1
+- Update any inline code comments or Javadoc that reference "WIP" or "TODO"
+
+**Exit criteria:** README accurately documents the current feature set; version is `0.1.0`; CHANGELOG exists.
+
+---
+
 ## Phase Summary
 
 | # | Phase | Key Outcome |
@@ -135,3 +149,4 @@ Evolve Boudin from a proof-of-concept into a production-grade durable workflow e
 | 5 | Activity Enforcement | Retries and timeouts actually enforced |
 | 6 | Child Workflows | Workflows can start workflows |
 | 7 | Observability | Metrics and MDC tracing in production |
+| 8 | Document & Version Bump | README complete; version `0.1.0`; CHANGELOG |
