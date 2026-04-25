@@ -33,14 +33,20 @@ public class ActivityRegistry {
      */
     public void register(Object activityImpl) {
         Class<?> implClass = activityImpl.getClass();
+        boolean foundInterface = false;
         for (Class<?> iface : implClass.getInterfaces()) {
             if (!iface.isAnnotationPresent(ActivityInterface.class)) continue;
+            foundInterface = true;
             for (Method method : iface.getDeclaredMethods()) {
                 if (!method.isAnnotationPresent(ActivityMethod.class)) continue;
                 String key = activityTypeKey(iface, method);
                 activities.put(key, new ActivityEntry(activityImpl, method));
                 log.debug("Registered activity: {}", key);
             }
+        }
+        if (!foundInterface) {
+            throw new IllegalArgumentException(
+                    implClass.getName() + " does not implement any @ActivityInterface-annotated interface");
         }
     }
 
