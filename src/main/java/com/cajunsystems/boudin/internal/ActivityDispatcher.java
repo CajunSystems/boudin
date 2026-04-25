@@ -132,47 +132,62 @@ public class ActivityDispatcher {
 
     private void executeActivity(HistoryEvent.ActivityScheduled scheduled) {
         LogTag historyTag = LogTag.of("workflow-history", scheduled.workflowId());
-        log.debug("Executing activity {} (type={}) for workflow {}",
-                scheduled.activityId(), scheduled.activityType(), scheduled.workflowId());
+        int maxAttempts = scheduled.maxAttempts();
+        long initialIntervalMs = scheduled.initialIntervalMs();
+        double backoffCoefficient = scheduled.backoffCoefficient();
 
-        try {
-            byte[] resultBytes = activityRegistry.invoke(scheduled.activityType(), scheduled.input());
-
-            HistoryEvent.ActivityCompleted completed = new HistoryEvent.ActivityCompleted(
-                    UUID.randomUUID().toString(),
-                    Instant.now(),
-                    scheduled.workflowId(),
-                    scheduled.activityId(),
-                    resultBytes
-            );
-            sharedLog.append(
-                    AppendRequest.to(historyTag, HistorySerializer.INSTANCE.serialize(completed))
-            ).join();
-            log.debug("Activity {} completed for workflow {}",
-                    scheduled.activityId(), scheduled.workflowId());
-
-        } catch (Exception e) {
-            String errorType = e.getClass().getName();
-            String message = e.getMessage() != null ? e.getMessage() : "";
-            log.warn("Activity {} failed for workflow {}: {}",
-                    scheduled.activityId(), scheduled.workflowId(), message, e);
-
-            HistoryEvent.ActivityFailed failed = new HistoryEvent.ActivityFailed(
-                    UUID.randomUUID().toString(),
-                    Instant.now(),
-                    scheduled.workflowId(),
-                    scheduled.activityId(),
-                    errorType,
-                    message
-            );
+        Exception lastException = null;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            log.debug("Executing activity {} attempt {}/{} (type={}) for workflow {}",
+                    scheduled.activityId(), attempt, maxAttempts,
+                    scheduled.activityType(), scheduled.workflowId());
             try {
+                byte[] resultBytes = activityRegistry.invoke(scheduled.activityType(), scheduled.input());
+
+                HistoryEvent.ActivityCompleted completed = new HistoryEvent.ActivityCompleted(
+                        UUID.randomUUID().toString(), Instant.now(),
+                        scheduled.workflowId(), scheduled.activityId(), resultBytes);
                 sharedLog.append(
-                        AppendRequest.to(historyTag, HistorySerializer.INSTANCE.serialize(failed))
+                        AppendRequest.to(historyTag, HistorySerializer.INSTANCE.serialize(completed))
                 ).join();
-            } catch (Exception appendEx) {
-                log.error("Failed to append ActivityFailed for activity {}",
-                        scheduled.activityId(), appendEx);
+                log.debug("Activity {} completed for workflow {}",
+                        scheduled.activityId(), scheduled.workflowId());
+                return;
+
+            } catch (Exception e) {
+                lastException = e;
+                log.warn("Activity {} attempt {}/{} failed for workflow {}: {}",
+                        scheduled.activityId(), attempt, maxAttempts,
+                        scheduled.workflowId(), e.getMessage());
+                if (attempt < maxAttempts) {
+                    long backoffMs = (long) (initialIntervalMs * Math.pow(backoffCoefficient, attempt - 1));
+                    try {
+                        Thread.sleep(backoffMs);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return; // Worker shutting down
+                    }
+                }
             }
+        }
+
+        // All attempts exhausted — append permanent failure
+        String message = "Activity failed after " + maxAttempts + " attempt(s)";
+        if (lastException != null && lastException.getMessage() != null) {
+            message += ": " + lastException.getMessage();
+        }
+        log.warn("Activity {} permanently failed for workflow {} after {} attempt(s)",
+                scheduled.activityId(), scheduled.workflowId(), maxAttempts);
+
+        HistoryEvent.ActivityFailed failed = new HistoryEvent.ActivityFailed(
+                UUID.randomUUID().toString(), Instant.now(),
+                scheduled.workflowId(), scheduled.activityId(), "maxAttemptsExceeded", message);
+        try {
+            sharedLog.append(
+                    AppendRequest.to(historyTag, HistorySerializer.INSTANCE.serialize(failed))
+            ).join();
+        } catch (Exception appendEx) {
+            log.error("Failed to append ActivityFailed for activity {}", scheduled.activityId(), appendEx);
         }
     }
 
