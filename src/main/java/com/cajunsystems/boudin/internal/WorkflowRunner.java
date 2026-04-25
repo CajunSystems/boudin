@@ -47,6 +47,7 @@ public class WorkflowRunner {
     private final long lastHistorySeqnum;
 
     private final Runnable onComplete;
+    private final BoudinEventLoop eventLoop;
 
     private WorkflowContext context;
     private WorkflowThread workflowThread;
@@ -59,7 +60,8 @@ public class WorkflowRunner {
                           WorkflowRegistry workflowRegistry,
                           List<HistoryEvent> existingHistory,
                           long lastHistorySeqnum,
-                          Runnable onComplete) {
+                          Runnable onComplete,
+                          BoudinEventLoop eventLoop) {
         this.workflowId = workflowId;
         this.taskQueue = taskQueue;
         this.sharedLog = sharedLog;
@@ -67,6 +69,7 @@ public class WorkflowRunner {
         this.existingHistory = existingHistory;
         this.lastHistorySeqnum = lastHistorySeqnum;
         this.onComplete = onComplete;
+        this.eventLoop = eventLoop;
     }
 
     /**
@@ -103,9 +106,11 @@ public class WorkflowRunner {
 
         historySubscription = historyView.subscribe(
                 new LogPosition(subscribeFrom),
-                entry -> onHistoryEvent(
-                        entry.seqnum(),
-                        HistorySerializer.INSTANCE.deserialize(entry.data()), impl, workflowType)
+                entry -> {
+                    long seqnum = entry.seqnum();
+                    HistoryEvent event = HistorySerializer.INSTANCE.deserialize(entry.data());
+                    eventLoop.submit(() -> onHistoryEvent(seqnum, event, impl, workflowType));
+                }
         );
 
         // Replay historical signals BEFORE starting the workflow thread.
