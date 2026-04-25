@@ -105,7 +105,11 @@ public class WorkflowContext {
         CompletableFuture<byte[]> future =
                 pendingActivities.computeIfAbsent(activityId, id -> new CompletableFuture<>());
         // Virtual thread parks here — cheap because virtual threads are unmounted during join()
-        return future.join();
+        try {
+            return future.join();
+        } finally {
+            pendingActivities.remove(activityId);
+        }
     }
 
     /**
