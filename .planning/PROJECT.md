@@ -37,7 +37,7 @@ Developers write normal sequential Java code. Boudin makes it durable, recoverab
 - [ ] Child workflows — start a workflow from within a workflow; fan-out, saga patterns
 - [ ] Exactly-once activity semantics — fix at-least-once gap; activity must not re-execute after result is written
 - [ ] KV-based crash recovery — use Gumbo KV checkpoints to avoid full log scan on worker startup
-- [ ] Query methods — read workflow state synchronously without waiting for completion
+- [x] Query methods — read workflow state synchronously without waiting for completion (Phase 9)
 - [ ] Observability — structured metrics (workflow/activity latency, failure rates, queue depth), MDC tracing, health endpoints
 - [ ] Workflow timeout enforcement — enforce WorkflowOptions.workflowRunTimeout
 - [ ] Idempotent workflow start — built-in dedup on workflowId so double-start is safe
