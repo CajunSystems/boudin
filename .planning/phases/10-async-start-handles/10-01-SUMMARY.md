@@ -1,6 +1,6 @@
 # Phase 10, Plan 1: Async Start & Workflow Handles — Summary
 
-## Status: Complete (uncommitted)
+## Status: Complete, PR #4 review addressed (uncommitted)
 
 ## What Was Built
 
@@ -22,7 +22,7 @@ the dispatcher's active-workflow set.
 | 2 | `WorkflowHandle` and `WorkflowTimeoutException` |
 | 3 | Async start mode in `WorkflowStub`; `appendStart` shared with blocking start |
 | 4 | `WorkflowClient.start`/`getHandle`/`listWorkflows`; `KV_ACTIVE_WORKFLOWS` made public |
-| 5 | `WorkflowHandleTest` — 14 tests |
+| 5 | `WorkflowHandleTest` — 14 tests, plus 5 from the review round |
 | 6 | README section, TOC, package structure, and `WorkflowClient` javadoc |
 
 ## Key Design Decisions
@@ -58,7 +58,7 @@ the dispatcher's active-workflow set.
 
 ## Test Results
 
-`mvn clean verify` — **54/54 pass**, including the 14 new tests.
+`mvn clean verify` — **59/59 pass**, including the 19 new tests.
 
 Coverage of note: start returning while the workflow is still parked; result retrieval for an
 already-completed workflow via a freshly-built handle; cross-client reattach by ID alone;
@@ -74,9 +74,31 @@ overload; and a double start on one workflow ID producing a single execution.
   returns, so the subscription is opened afterwards from `BEGINNING` — equivalent, because the
   backlog carries any terminal event already written. Blocking-start behaviour is unchanged and
   the existing tests cover it.
-- Each abandoned `getResultAsync()` leaves a subscription open until the workflow terminates,
-  at which point the dependent stage closes it. Bounded and documented; a test confirms
-  abandoning several waiters does not break later calls.
+- An abandoned `getResultAsync()` future leaves its subscription open until the workflow
+  terminates. Cancelling the returned future releases it immediately; the review round made that
+  the documented contract rather than claiming abandonment was enough.
+
+## PR #4 review round
+
+Seven findings from `contrasam`, all legitimate; each verified against the branch before fixing.
+
+| Finding | Fix |
+|---|---|
+| `start()` bound a cross-client stub to the wrong `SharedLog`, so `getResult()` blocked forever on an empty history tag — and the javadoc promised a check that did not exist | `AsyncStart` records the log the workflow was started on; `startInternal` rejects a mismatch. The javadoc now lists what is actually enforced |
+| Each `getResult(timeout)` that expired leaked a live subscription, despite the javadoc claiming otherwise — and the exception's own message invites retrying | The timeout and interrupt paths cancel the future, and `getResultAsync` closes the subscription when the *returned* future settles, cancellation included. The javadoc now says dropping the reference is not the same as cancelling |
+| The supplied-workflowId subscription leaked when `appendStart` threw, since the append ran before the `try` | `appendStart` moved inside the `try`, with a null guard for the generated-ID path where the subscription does not exist yet |
+| Two workflow calls in one `start()` lambda started both but returned a handle to only the second; a nested `start()` cleared the outer thread-local and dropped the outer lambda into blocking start | Both now throw `IllegalStateException` — the second before it durably starts anything, and nesting at `beginAsyncStart` |
+| `listWorkflows` leaked a raw `KryoException` from a public API on an unreadable KV value | Degrades to an empty list with a warning, matching `WorkflowDispatcher.loadActiveWorkflows` on the same key |
+| `getResultAsync` blocked on a full history read before returning the future, defeating the async variant | The catch-up read is chained rather than joined; the subscription is already in place, so nothing can slip between the two |
+| `completeFrom` duplicated between `WorkflowHandle` and `WorkflowStub` | Extracted to `TerminalEvents` — the same move PR #3 made with `WireNames`. Adding a terminal event now changes one place, so blocking stubs and handles cannot disagree about when a workflow has finished |
+
+Five new tests. Four are genuine regression tests, verified to fail with their fix reverted:
+cross-log start, two starts in one lambda, nested start, and the unreadable KV value.
+
+**One is not.** `repeatedTimedWaitsOnAParkedWorkflowStillResolve` passes with or without the
+subscription-cancel fix, because an open subscription is not observable through the public API.
+It is a smoke test that repeated timed waits still resolve, not proof the leak is gone — the
+proof is that `getResultAsync` now closes on the returned future settling, cancellation included.
 
 ## Follow-Ups
 

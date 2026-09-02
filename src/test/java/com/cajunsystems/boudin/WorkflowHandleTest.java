@@ -297,6 +297,83 @@ class WorkflowHandleTest {
         assertThat(client.listWorkflows("no-such-queue")).isEmpty();
     }
 
+    // ── PR #4 review regressions ─────────────────────────────────────────────
+
+    @Test
+    void startWithAStubFromADifferentSharedLogIsRejected() throws Exception {
+        // Two log services in one JVM. The async-start marker is per-thread rather than
+        // per-client, so without a check clientA.start(stubFromB) would durably start the
+        // workflow on B's log and hand back a handle reading A's — blocking forever.
+        try (SharedLogService otherLog = SharedLogService.open(SharedLogConfig.builder()
+                .persistenceAdapter(new InMemoryPersistenceAdapter())
+                .build())) {
+
+            CountingWorkflow foreignStub = WorkflowClient.newInstance(otherLog)
+                    .newWorkflowStub(CountingWorkflow.class,
+                            WorkflowOptions.newBuilder().taskQueue("handles").build());
+
+            assertThatThrownBy(() -> client.start(() -> foreignStub.count("abcd")))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("different shared log");
+        }
+    }
+
+    @Test
+    void startCallingTwoWorkflowMethodsIsRejected() {
+        CountingWorkflow first = stub(CountingWorkflow.class, null);
+        CountingWorkflow second = stub(CountingWorkflow.class, null);
+
+        // Only one handle can be returned, so the second workflow would run unobserved.
+        assertThatThrownBy(() -> client.start(() -> {
+            first.count("abcd");
+            return second.count("efghi");
+        })).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("more than one workflow");
+    }
+
+    @Test
+    void nestedStartIsRejectedRatherThanBlocking() {
+        CountingWorkflow outer = stub(CountingWorkflow.class, null);
+        CountingWorkflow inner = stub(CountingWorkflow.class, null);
+
+        // An inner start would clear the outer's thread-local on the way out, dropping the outer
+        // lambda into blocking start — a hang inside start(). Fail fast instead.
+        assertThatThrownBy(() -> client.start(() -> {
+            client.start(() -> inner.count("inner"));
+            return outer.count("outer");
+        })).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("cannot be nested");
+    }
+
+    @Test
+    void repeatedTimedWaitsOnAParkedWorkflowStillResolve() {
+        ParkingWorkflow parking = stub(ParkingWorkflow.class, null);
+        WorkflowHandle<String> handle = client.start(() -> parking.run("polled"));
+        await().atMost(5, SECONDS).until(ParkingWorkflowImpl.reachedAwait::get);
+
+        // Each timed wait that expires must release its subscription; before the fix this
+        // accumulated one per attempt for as long as the workflow stayed parked.
+        for (int i = 0; i < 20; i++) {
+            assertThatThrownBy(() -> handle.getResult(Duration.ofMillis(20)))
+                    .isInstanceOf(WorkflowTimeoutException.class);
+        }
+
+        stub(ParkingWorkflow.class, handle.workflowId()).release("at-last");
+        assertThat(handle.getResult(Duration.ofSeconds(5))).isEqualTo("polled:at-last");
+    }
+
+    @Test
+    void listWorkflowsReportsNoneWhenTheStoredValueIsUnreadable() {
+        // A worker on a different build, or a partially written value, leaves bytes this build
+        // cannot decode. A public read must not leak a raw Kryo failure.
+        sharedLog.getView(com.cajunsystems.gumbo.core.LogTag.of("workflow-tasks", "corrupt-queue"))
+                .setValue(com.cajunsystems.boudin.internal.WorkflowDispatcher.KV_ACTIVE_WORKFLOWS,
+                        new byte[]{1, 2, 3, 4, 5})
+                .join();
+
+        assertThat(client.listWorkflows("corrupt-queue")).isEmpty();
+    }
+
     @Test
     void startWithoutCallingAWorkflowMethodIsRejected() {
         assertThatThrownBy(() -> client.start(() -> "not a workflow call"))
