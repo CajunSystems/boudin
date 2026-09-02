@@ -6,7 +6,9 @@ import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Method;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
@@ -40,6 +42,7 @@ public class WorkflowRegistry {
     public void register(Class<?> implClass) {
         Class<?> workflowInterface = findWorkflowInterface(implClass);
         Method workflowMethod = findAnnotatedMethod(workflowInterface, WorkflowMethod.class);
+        validateQueryMethods(workflowInterface);
         String workflowType = workflowInterface.getSimpleName();
 
         Supplier<Object> factory = () -> {
@@ -135,6 +138,34 @@ public class WorkflowRegistry {
         }
         throw new IllegalArgumentException(
                 implClass.getName() + " does not implement any @WorkflowInterface-annotated interface");
+    }
+
+    /**
+     * Validates every {@link QueryMethod} on the interface: each must return a value (a query
+     * that returns nothing cannot report state), and no two may resolve to the same query name.
+     */
+    private static void validateQueryMethods(Class<?> iface) {
+        Map<String, Method> byName = new HashMap<>();
+        for (Method method : iface.getDeclaredMethods()) {
+            QueryMethod ann = method.getAnnotation(QueryMethod.class);
+            if (ann == null) continue;
+
+            if (method.getReturnType() == Void.TYPE) {
+                throw new IllegalArgumentException(
+                        iface.getName() + "#" + method.getName() +
+                        " is annotated @QueryMethod but returns void; " +
+                        "query methods must return the state being queried.");
+            }
+
+            String name = ann.name().isBlank() ? method.getName() : ann.name();
+            Method existing = byName.put(name, method);
+            if (existing != null) {
+                throw new IllegalArgumentException(
+                        iface.getName() + " has two @QueryMethod methods resolving to the query " +
+                        "name '" + name + "': " + existing.getName() + " and " + method.getName() +
+                        ". Query names must be unique; use @QueryMethod(name=...) to disambiguate.");
+            }
+        }
     }
 
     private static Method findAnnotatedMethod(Class<?> iface,
