@@ -18,10 +18,15 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * {@link InvocationHandler} for signal-only stubs that target an already-running workflow.
+ * {@link InvocationHandler} for stubs that target an already-running workflow by ID.
  *
- * <p>Used by {@link WorkflowClient#newWorkflowStub(Class, String, String)} to send
- * signals to a workflow identified by its ID without starting a new execution.
+ * <p>Used by {@link WorkflowClient#newWorkflowStub(Class, String, String)} to send signals to,
+ * and run queries against, a workflow identified by its ID without starting a new execution.
+ * Calling the {@code @WorkflowMethod} is rejected.
+ *
+ * <p>Queries use {@link WorkflowOptions#DEFAULT_QUERY_TIMEOUT}. To choose a different timeout,
+ * use {@link WorkflowClient#newWorkflowStub(Class, WorkflowOptions)} with both
+ * {@code workflowId} and {@code queryTimeout} set.
  */
 class SignalOnlyStub implements InvocationHandler {
 
@@ -51,7 +56,8 @@ class SignalOnlyStub implements InvocationHandler {
             return sendSignal(method, args);
         }
         if (method.isAnnotationPresent(QueryMethod.class)) {
-            throw new UnsupportedOperationException("Query methods are not yet supported.");
+            return QueryClient.query(
+                    sharedLog, workflowId, method, args, WorkflowOptions.DEFAULT_QUERY_TIMEOUT);
         }
         throw new UnsupportedOperationException("Unknown method: " + method.getName());
     }
