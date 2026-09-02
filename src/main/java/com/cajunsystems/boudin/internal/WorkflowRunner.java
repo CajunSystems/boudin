@@ -2,16 +2,21 @@ package com.cajunsystems.boudin.internal;
 
 import com.cajunsystems.boudin.history.HistoryEvent;
 import com.cajunsystems.boudin.history.HistorySerializer;
+import com.cajunsystems.boudin.query.QueryMessage;
+import com.cajunsystems.boudin.query.QuerySerializer;
+import com.cajunsystems.boudin.serialization.KryoSerializer;
 import com.cajunsystems.boudin.workflow.WorkflowContext;
 import com.cajunsystems.boudin.workflow.WorkflowThread;
 import com.cajunsystems.gumbo.api.LogView;
 import com.cajunsystems.gumbo.api.SharedLog;
+import com.cajunsystems.gumbo.core.AppendRequest;
 import com.cajunsystems.gumbo.core.LogPosition;
 import com.cajunsystems.gumbo.core.LogTag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Method;
+import java.time.Instant;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -27,6 +32,8 @@ import java.util.concurrent.ConcurrentHashMap;
  *       last known history entry to receive live events (activity results, signals).</li>
  *   <li>Routing incoming history events to the {@link WorkflowContext} to unblock
  *       the workflow virtual thread.</li>
+ *   <li>Subscribing to {@code workflow-queries:{workflowId}} and answering
+ *       {@link QueryMessage.QueryRequested} messages from the workflow implementation.</li>
  *   <li>Starting the {@link WorkflowThread} which runs the workflow method.</li>
  * </ol>
  *
@@ -54,7 +61,9 @@ public class WorkflowRunner {
     private WorkflowContext context;
     private WorkflowThread workflowThread;
     private SharedLog.Subscription historySubscription;
+    private SharedLog.Subscription querySubscription;
     private final Set<Long> processedEventSeqnums = ConcurrentHashMap.newKeySet();
+    private final Set<String> answeredQueryIds = ConcurrentHashMap.newKeySet();
 
     public WorkflowRunner(String workflowId,
                           String taskQueue,
@@ -119,6 +128,20 @@ public class WorkflowRunner {
                 }
         );
 
+        // Subscribe to workflow-queries:{workflowId} for control-plane query requests.
+        // Read from BEGINNING: a client may have appended its request before this runner
+        // existed, and query messages are never part of the replayed history.
+        LogTag queryTag = LogTag.of("workflow-queries", workflowId);
+        querySubscription = sharedLog.getView(queryTag).subscribe(
+                LogPosition.BEGINNING,
+                entry -> {
+                    QueryMessage message = QuerySerializer.INSTANCE.deserialize(entry.data());
+                    if (message instanceof QueryMessage.QueryRequested request) {
+                        eventLoop.submit(() -> onQueryRequested(request, impl, workflowType));
+                    }
+                }
+        );
+
         // Replay historical signals BEFORE starting the workflow thread.
         // This ensures signal-modified fields are visible when the thread evaluates
         // Workflow.await() conditions during replay.
@@ -179,6 +202,51 @@ public class WorkflowRunner {
     }
 
     /**
+     * Answers a query request against this workflow instance.
+     *
+     * <p>Runs on the event loop only long enough to dedupe; the handler invocation and the
+     * response append happen on a virtual thread, because the append blocks on {@code join()}
+     * and must not stall dispatch for every other workflow on this worker.
+     */
+    private void onQueryRequested(QueryMessage.QueryRequested request, Object impl, String workflowType) {
+        if (!answeredQueryIds.add(request.queryId())) return;
+
+        Thread.ofVirtual().name("boudin-query-" + request.queryId()).start(() -> {
+            QueryMessage response;
+            Method queryMethod = workflowRegistry.findQueryMethod(workflowType, request.queryName());
+
+            if (queryMethod == null) {
+                log.warn("No query handler found for '{}' in workflow type {}",
+                        request.queryName(), workflowType);
+                response = new QueryMessage.QueryFailed(
+                        request.queryId(), Instant.now(), workflowId, "UnknownQuery",
+                        "No @QueryMethod named '" + request.queryName() + "' on " + workflowType);
+            } else {
+                try {
+                    Object result = context.invokeQuery(queryMethod, impl, request.args());
+                    byte[] resultBytes = result != null ? KryoSerializer.toBytes(result) : new byte[0];
+                    response = new QueryMessage.QueryCompleted(
+                            request.queryId(), Instant.now(), workflowId, resultBytes);
+                } catch (Throwable t) {
+                    log.warn("Query '{}' on workflow {} threw", request.queryName(), workflowId, t);
+                    response = new QueryMessage.QueryFailed(
+                            request.queryId(), Instant.now(), workflowId,
+                            t.getClass().getSimpleName(), String.valueOf(t.getMessage()));
+                }
+            }
+
+            try {
+                sharedLog.append(AppendRequest.to(
+                        LogTag.of("workflow-queries", workflowId),
+                        QuerySerializer.INSTANCE.serialize(response))).join();
+            } catch (Exception e) {
+                log.error("Failed to append query response for query {} on workflow {}",
+                        request.queryId(), workflowId, e);
+            }
+        });
+    }
+
+    /**
      * Replays all {@link HistoryEvent.SignalReceived} events from the existing history
      * directly onto the workflow implementation before the virtual thread starts.
      */
@@ -211,6 +279,10 @@ public class WorkflowRunner {
         if (historySubscription != null) {
             try { historySubscription.close(); } catch (Exception ignored) {}
             historySubscription = null;
+        }
+        if (querySubscription != null) {
+            try { querySubscription.close(); } catch (Exception ignored) {}
+            querySubscription = null;
         }
         if (workflowThread != null && workflowThread.thread().isAlive()) {
             workflowThread.thread().interrupt();

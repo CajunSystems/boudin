@@ -187,6 +187,41 @@ public class WorkflowContext {
         }
     }
 
+    // ── Query handling ───────────────────────────────────────────────────────
+
+    /**
+     * Invokes a {@link com.cajunsystems.boudin.annotation.QueryMethod}-annotated handler on the
+     * workflow implementation and returns its value.
+     *
+     * <p>Held under {@link #signalLock}, so a query never interleaves with a signal handler.
+     * No {@code notifyAll()} follows — a query changes nothing, so there is nothing to wake.
+     * A query may still observe the workflow thread between yield points; handlers must not
+     * modify workflow state.
+     *
+     * @param queryMethod the query handler resolved from the workflow interface
+     * @param impl        the workflow implementation instance
+     * @param argBytes    Kryo-serialized query arguments
+     * @return the handler's return value
+     * @throws Exception whatever the handler threw, unwrapped from the reflective call
+     */
+    public Object invokeQuery(Method queryMethod, Object impl, byte[] argBytes) throws Exception {
+        Object[] args = argBytes != null && argBytes.length > 0
+                ? (Object[]) KryoSerializer.fromBytes(argBytes)
+                : new Object[0];
+        synchronized (signalLock) {
+            try {
+                return queryMethod.invoke(impl, args);
+            } catch (java.lang.reflect.InvocationTargetException e) {
+                Throwable cause = e.getCause();
+                if (cause instanceof Exception ex) throw ex;
+                if (cause instanceof Error err) throw err;
+                throw e;
+            }
+        }
+    }
+
+    // ── Signal / condition waiting (continued) ───────────────────────────────
+
     /**
      * Parks the workflow thread until {@code condition} returns true or {@code timeout} elapses.
      *
