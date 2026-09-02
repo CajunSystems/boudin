@@ -3,14 +3,21 @@
 ## Current Position
 
 - **Milestone:** 2 — Operable Boudin (In Progress)
-- **Phase:** 9 — Query Methods (merged); 8.1 — Gumbo Upgrade (inserted, merged)
-- **Plan:** 09-01 and 08.1-01 — Complete
-- **Next:** Phase 10 — Async Start & Workflow Handles
-- **Status:** Merged to `main` in PR #3 (merge commit `7c4f804`, 2026-09-02), CI green.
-  15 commits: the gumbo upgrade, queries, and nine review fixes. `mvn verify` passes 40/40 —
-  the first time the full suite completes in a single JVM.
+- **Phase:** 10 — Async Start & Workflow Handles (built, uncommitted)
+- **Plan:** 10-01 — Complete; 09-01 and 08.1-01 merged in PR #3 (`7c4f804`)
+- **Next:** Phase 11 — Cancellation & Termination
+- **Status:** Phases 8.1 and 9 merged to `main`, CI green. Phase 10 built on
+  `feat/phase-10-workflow-handles`: `mvn clean verify` passes 54/54.
 
 ## Key Decisions
+
+- **Async start is a lambda, not per-arity functional interfaces** (Phase 10).
+  `client.start(() -> stub.process(order))` puts the stub into async mode via a thread-local,
+  so `Supplier`/`Runnable` cover every workflow signature where Temporal's `start(stub::m, args)`
+  spelling needs `Func0..FuncN` and `Proc0..ProcN`. Arguments stay compiler-checked.
+- **`describe()` is log-derived, queries are worker-derived** (Phase 10). A handle answers for
+  completed and unhosted executions; a `@QueryMethod` reports live in-memory state and only
+  while a worker hosts the workflow. The two are not alternatives.
 
 - Hybrid NIO event loop (infrastructure) + virtual threads (user code)
 - Gumbo KV store for worker checkpoints — eliminates full log scan on startup

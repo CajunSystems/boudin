@@ -29,6 +29,7 @@ Write ordinary Java methods. Get automatic durability, crash recovery, activity 
   - [WorkflowOptions / ActivityOptions](#workflowoptions--activityoptions)
   - [Durable Timers](#durable-timers)
   - [Child Workflows](#child-workflows)
+  - [Async Start & Workflow Handles](#async-start--workflow-handles)
   - [Queries](#queries)
   - [Observability](#observability)
 - [Package Structure](#package-structure)
@@ -300,6 +301,12 @@ WorkflowClient client = WorkflowClient.newInstance(sharedLog);
 MyWorkflow stub = client.newWorkflowStub(MyWorkflow.class, options);
 Result r = stub.run(input);
 
+// Start without blocking — returns as soon as the workflow is durably started
+WorkflowHandle<Result> handle = client.start(() -> stub.run(input));
+
+// Reattach to any execution by ID, from any process
+WorkflowHandle<Result> later = client.getHandle(workflowId, Result.class);
+
 // Target an already-running workflow by ID (no new execution started).
 // Supports @SignalMethod and @QueryMethod; calling @WorkflowMethod throws.
 MyWorkflow existing = client.newWorkflowStub(MyWorkflow.class, workflowId, taskQueue);
@@ -432,6 +439,78 @@ try {
 
 The child workflow must be registered on a worker that listens to the target task queue.
 Both parent and child implementations can be registered on the same `Worker` instance.
+
+### Async Start & Workflow Handles
+
+Calling a `@WorkflowMethod` on a stub blocks for the workflow's entire lifetime. That is wrong
+for anything request-scoped: a workflow can run for days, and no HTTP handler can wait. Start it
+without blocking and collect the result whenever — or wherever — you like.
+
+```java
+OrderWorkflow stub = client.newWorkflowStub(OrderWorkflow.class, options);
+
+// Returns as soon as the workflow is durably recorded in the log
+WorkflowHandle<OrderResult> handle = client.start(() -> stub.process(order));
+
+return handle.workflowId();   // hand this to the caller and return
+```
+
+The lambda calls the workflow method as normal Java, so the compiler type-checks the arguments —
+but inside `start(...)` the stub only records the start and returns a placeholder, so **ignore
+the lambda's own return value**. Use `client.start(() -> stub.someVoidMethod(x))` for a `void`
+workflow method; the `Runnable` overload is selected automatically.
+
+Later, in the same process or a different one, the workflow ID is all you need:
+
+```java
+WorkflowHandle<OrderResult> handle = client.getHandle(workflowId, OrderResult.class);
+
+OrderResult r = handle.getResult();                       // block until done
+OrderResult r = handle.getResult(Duration.ofSeconds(30)); // or give up waiting
+CompletableFuture<OrderResult> f = handle.getResultAsync();
+```
+
+`getResult` works **after** the workflow has finished, however long ago — it reads the terminal
+event from history rather than waiting for one to arrive. A failed workflow throws
+`WorkflowFailureException`, the same contract as a blocking stub call. `getResult(Duration)`
+throws `WorkflowTimeoutException`, which describes *your wait* expiring, not the workflow: it is
+still running, and the same handle can be waited on again.
+
+#### Inspecting an execution
+
+```java
+WorkflowExecutionDescription d = handle.describe();
+
+d.status();        // RUNNING | COMPLETED | FAILED
+d.workflowType();  // "OrderWorkflow"
+d.taskQueue();
+d.startedAt();
+d.closedAt();      // null while RUNNING
+d.historyLength();
+d.failure();       // errorType + message, null unless FAILED
+```
+
+`describe()` needs no running worker — it is derived from the log, so it answers for completed
+and unhosted executions. That is the difference from a query: a `@QueryMethod` reports live
+in-memory state and only while a worker hosts the workflow.
+
+#### Listing what is running
+
+```java
+List<String> ids = client.listWorkflows("orders");
+```
+
+This reads the dispatcher's active-workflow set for one task queue. Read it for what it is
+rather than as a query index:
+
+- it covers a single task queue, not the whole log
+- a workflow whose worker died without processing its own terminal event stays listed until a
+  worker recovers it
+- it is empty until a worker has run on that queue, even if workflows were started
+
+Use `describe()` for the authoritative state of any single execution.
+
+---
 
 ### Queries
 
@@ -590,7 +669,9 @@ com.cajunsystems.boudin
 ├── annotation/         @WorkflowInterface, @WorkflowMethod, @SignalMethod,
 │                       @QueryMethod, @ActivityInterface, @ActivityMethod
 ├── api/                Worker, WorkflowClient, WorkflowStub, SignalOnlyStub, QueryClient,
-│                       WorkflowOptions, WorkflowFailureException, WorkflowQueryException
+│                       WorkflowHandle, WorkflowExecutionDescription, WorkflowStatus,
+│                       WorkflowOptions, WorkflowFailureException, WorkflowQueryException,
+│                       WorkflowTimeoutException
 ├── activity/           ActivityStub (InvocationHandler), ActivityOptions,
 │                       ActivityFailureException
 ├── history/            HistoryEvent (sealed hierarchy, 13 record types), HistorySerializer

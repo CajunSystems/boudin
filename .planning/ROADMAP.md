@@ -231,7 +231,8 @@ collect its result.
 - `WorkflowClient.listWorkflows(taskQueue)` — read the active-workflow KV set
 
 **Exit criteria:** A web request handler can start a workflow, return immediately, and a later
-request in a different process can fetch the result by workflow ID.
+request in a different process can fetch the result by workflow ID. ✅ Built in Phase 10, plan
+10-01 (54/54 tests).
 
 ---
 
