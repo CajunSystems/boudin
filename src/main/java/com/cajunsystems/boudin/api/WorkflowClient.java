@@ -4,6 +4,8 @@ import com.cajunsystems.boudin.internal.WorkflowDispatcher;
 import com.cajunsystems.boudin.serialization.KryoSerializer;
 import com.cajunsystems.gumbo.api.SharedLog;
 import com.cajunsystems.gumbo.core.LogTag;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Proxy;
 import java.util.List;
@@ -61,6 +63,8 @@ import java.util.function.Supplier;
  * }</pre>
  */
 public class WorkflowClient {
+
+    private static final Logger log = LoggerFactory.getLogger(WorkflowClient.class);
 
     private final SharedLog sharedLog;
 
@@ -137,11 +141,12 @@ public class WorkflowClient {
      * <p>The arguments are supplied by ordinary Java at the call site, so this one method covers
      * every workflow signature and the compiler still type-checks the call.
      *
-     * <p>Use {@link #start(Runnable)} for a workflow method declared {@code void}. Nesting
-     * {@code start} calls is not supported.
+     * <p>Use {@link #start(Runnable)} for a workflow method declared {@code void}.
      *
-     * @throws IllegalStateException if the lambda did not call a {@code @WorkflowMethod} on a
-     *                               stub created by this client
+     * @throws IllegalStateException if the lambda calls no {@code @WorkflowMethod}, calls more
+     *                               than one, uses a stub belonging to a different shared log,
+     *                               or nests another {@code start} call — each of which would
+     *                               otherwise return a handle that does not match what ran
      */
     public <T> WorkflowHandle<T> start(Supplier<T> invocation) {
         return startInternal(invocation::get);
@@ -167,6 +172,17 @@ public class WorkflowClient {
                     "WorkflowClient.start(...) did not start a workflow. The lambda must call a "
                     + "@WorkflowMethod on a stub from WorkflowClient.newWorkflowStub(...) — a "
                     + "signal, a query, or an unrelated call does not start one.");
+        }
+        if (pending.sharedLog != sharedLog) {
+            // The async-start marker is per-thread, not per-client, so it intercepts any stub
+            // invoked inside the lambda — including one belonging to a client over a different
+            // log. That would durably start the workflow on the other log while the handle read
+            // this one, so getResult would block forever on an empty history tag.
+            throw new IllegalStateException(
+                    "WorkflowClient.start(...) was given a stub belonging to a different shared "
+                    + "log. Workflow '" + pending.workflowId + "' was started on that log, so a "
+                    + "handle from this client could never read it. Call start(...) on the same "
+                    + "client the stub came from.");
         }
         return new WorkflowHandle<>(sharedLog, pending.workflowId);
     }
@@ -197,18 +213,29 @@ public class WorkflowClient {
      *   <li>it covers one task queue, not the whole log;</li>
      *   <li>a workflow whose worker died without processing its own terminal event stays listed
      *       until a worker recovers it;</li>
-     *   <li>it is empty until a worker has run on that queue, even if workflows were started.</li>
+     *   <li>it is empty until a worker has run on that queue, even if workflows were started;</li>
+     *   <li>it reports none, with a warning logged, if the stored value cannot be read.</li>
      * </ul>
      * Use {@link WorkflowHandle#describe()} for the authoritative state of any single execution.
      */
     @SuppressWarnings("unchecked")
     public List<String> listWorkflows(String taskQueue) {
         Objects.requireNonNull(taskQueue, "taskQueue");
-        byte[] data = sharedLog.getView(LogTag.of("workflow-tasks", taskQueue))
-                .getValue(WorkflowDispatcher.KV_ACTIVE_WORKFLOWS).join();
-        if (data == null || data.length == 0) return List.of();
-        Set<String> ids = (Set<String>) KryoSerializer.fromBytes(data);
-        return ids == null ? List.of() : List.copyOf(ids);
+        try {
+            byte[] data = sharedLog.getView(LogTag.of("workflow-tasks", taskQueue))
+                    .getValue(WorkflowDispatcher.KV_ACTIVE_WORKFLOWS).join();
+            if (data == null || data.length == 0) return List.of();
+            Set<String> ids = (Set<String>) KryoSerializer.fromBytes(data);
+            return ids == null ? List.of() : List.copyOf(ids);
+        } catch (Exception e) {
+            // A worker on a different build, or a partially written value, can leave bytes this
+            // build cannot decode. WorkflowDispatcher.loadActiveWorkflows degrades to an empty
+            // set on this same read; match it rather than leaking a raw Kryo failure out of a
+            // public API.
+            log.warn("Could not read the active-workflow set for task queue '{}', "
+                    + "reporting none: {}", taskQueue, e.toString());
+            return List.of();
+        }
     }
 
     /**
