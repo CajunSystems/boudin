@@ -83,14 +83,44 @@ landed mid-backlog. The upgrade removes that exposure.
   `client.newSignalOnlyStub(...)` in the README and `client.signalWorkflow(...)` in the
   `WorkflowClient` javadoc.
 
+### PR #3 review round
+
+Nine findings from `contrasam`, all legitimate; each verified against the branch before fixing.
+
+| Finding | Fix |
+|---|---|
+| Query answered before historical signals replayed, returning state contradicting durable history | Query subscription now opens *after* `replayHistoricalSignals()` |
+| Slow query handler holding `signalLock` stalls the shared single-threaded event loop for every workflow on the worker | Signal delivery moved to a per-workflow single-thread virtual executor, so the loop never blocks on `signalLock`. Blast radius now matches what the javadoc promises |
+| `ObservabilityTest.pendingWorkflowsGaugeIsZeroAfterCompletion` became a race under gumbo 0.6's per-subscription delivery threads — failed in this PR's own CI | Assertion polls for the gauge instead of reading it synchronously |
+| Both sides re-scanned the ever-growing query tag from `BEGINNING`; worker restart re-answered every historical request | Client subscribes from the tag's current tip; worker subscribes from tip and does one startup scan answering only unanswered requests newer than `STALE_REQUEST_CUTOFF` |
+| `answeredQueryIds` grew without bound | Replaced with a seqnum high-water mark — O(1) memory |
+| One undeserializable entry logged as an anonymous listener failure | Both listeners and the startup scan catch, log with seqnum, and skip |
+| Inherited `@QueryMethod` failed as `UnknownQuery` (`getDeclaredMethods()`) | Resolution and validation use `getMethods()`, with override-aware duplicate detection so a re-declared query is not mistaken for a name clash. Same fix applies to signals |
+| `queryTimeout` did not cover the blocking request append | One deadline now covers append and response wait |
+| Wire-name resolution duplicated in five places | Single `WireNames` helper |
+
+Three new regression tests, each verified to fail without its fix: inherited query resolution,
+the event-loop stall, and no duplicate responses after a worker restart.
+
+Two notes on the review itself:
+
+- The poison-entry finding overstated the consequence. gumbo 0.6.0's `SubscriptionImpl.deliver`
+  catches `Throwable` per entry and keeps the subscription alive precisely so "a broken listener
+  must not become a broken subscription", so one bad entry cannot stop query answering. The
+  guard is still right — it names the seqnum and keeps the startup scan safe.
+- The stall test took three attempts to become a real regression test. The first two passed
+  without the fix: activity result delivery is the path that actually needs the event loop (a
+  workflow that merely returns a value never touches it), and `supplyAsync` returns immediately,
+  so the signal had to be gated on the handler actually holding the lock.
+
 ### Known limitations to address later
 
-- The `workflow-queries:{workflowId}` tag has no retention — a long-lived workflow queried
-  frequently accumulates messages indefinitely. Related: the client subscribes from
-  `BEGINNING`, so each query re-reads prior messages on that tag (correct, but O(n)).
-- `WorkflowRunner.answeredQueryIds` grows for the lifetime of the workflow instance.
-- Each `WorkflowRunner` now opens a second subscription. Worth revisiting as one query
-  subscription per worker keyed by task queue if subscription count becomes a scaling concern.
+- The `workflow-queries:{workflowId}` tag still has no retention. Client and worker now both
+  read from the tip, so neither re-scans it during normal operation, but the tag itself grows
+  and the worker's one-time startup scan is O(tag). Trimming belongs with the Phase 13 history
+  retention work.
+- Each `WorkflowRunner` opens a second subscription plus a signal thread. Worth revisiting as
+  one query subscription per worker keyed by task queue if either becomes a scaling concern.
 
 ## Output
 
