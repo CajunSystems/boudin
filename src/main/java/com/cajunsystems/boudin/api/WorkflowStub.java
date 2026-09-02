@@ -71,6 +71,23 @@ class WorkflowStub implements InvocationHandler {
         }
 
         if (method.isAnnotationPresent(WorkflowMethod.class)) {
+            AsyncStart pending = ASYNC_START.get();
+            if (pending != null) {
+                // Inside WorkflowClient.start(...): durably start the workflow, record the ID for
+                // the handle, and return without waiting for a terminal event.
+                if (pending.workflowId != null) {
+                    // start() can only hand back one handle, so a second workflow would run
+                    // unobserved. Fail before durably starting it rather than after.
+                    throw new IllegalStateException(
+                            "WorkflowClient.start(...) started more than one workflow. Its lambda "
+                            + "must call exactly one @WorkflowMethod — '" + pending.workflowId
+                            + "' was already started, and only one handle can be returned. "
+                            + "Call start(...) once per workflow.");
+                }
+                pending.workflowId = appendStart(args);
+                pending.sharedLog = sharedLog;
+                return defaultValueFor(method.getReturnType());
+            }
             return startAndWait(method, args);
         } else if (method.isAnnotationPresent(SignalMethod.class)) {
             return sendSignal(method, args);
@@ -85,9 +102,91 @@ class WorkflowStub implements InvocationHandler {
         return workflowId;
     }
 
+    // ── Async start mode ──────────────────────────────────────────────────────
+
+    /**
+     * Marks the calling thread as being inside {@link WorkflowClient#start}, so a
+     * {@code @WorkflowMethod} invocation starts the workflow and returns instead of waiting.
+     *
+     * <p>A thread-local is what lets a plain typed method call express "start this" — the user
+     * writes {@code client.start(() -> stub.process(order))} and the compiler checks the
+     * arguments, with no per-arity functional interfaces.
+     */
+    private static final ThreadLocal<AsyncStart> ASYNC_START = new ThreadLocal<>();
+
+    /** Carries the started workflow ID, and the log it was started on, out of the user's lambda. */
+    static final class AsyncStart {
+        String workflowId;
+        SharedLog sharedLog;
+    }
+
+    static AsyncStart beginAsyncStart() {
+        if (ASYNC_START.get() != null) {
+            // A nested start would overwrite the outer thread-local and then clear it on the way
+            // out, silently dropping the outer lambda back into blocking start.
+            throw new IllegalStateException(
+                    "WorkflowClient.start(...) cannot be nested inside another start(...). "
+                    + "Start each workflow with its own top-level call.");
+        }
+        AsyncStart pending = new AsyncStart();
+        ASYNC_START.set(pending);
+        return pending;
+    }
+
+    static void endAsyncStart() {
+        ASYNC_START.remove();
+    }
+
     // ── Private ───────────────────────────────────────────────────────────────
 
     private Object startAndWait(Method method, Object[] args) throws Exception {
+        CompletableFuture<byte[]> resultFuture = new CompletableFuture<>();
+
+        // With a supplied workflow ID we can subscribe before appending. With a generated one the
+        // history tag is not known until the append returns — subscribing from BEGINNING
+        // afterwards is equivalent, since the backlog carries any terminal event already written.
+        SharedLog.Subscription sub = options.workflowId() != null
+                ? subscribeForResult(options.workflowId(), resultFuture)
+                : null;
+
+        // appendStart can throw — an unreachable log backend fails inside its join() calls — so
+        // it belongs inside the try that closes the subscription. Otherwise every failed or
+        // retried start with a supplied workflow ID leaked one subscription.
+        try {
+            String wfId = appendStart(args);
+            if (sub == null) {
+                sub = subscribeForResult(wfId, resultFuture);
+            }
+
+            byte[] resultBytes = resultFuture.join();
+            if (method.getReturnType() == Void.TYPE || resultBytes == null || resultBytes.length == 0) {
+                return null;
+            }
+            return KryoSerializer.fromBytes(resultBytes);
+        } finally {
+            // Still null when the ID was generated and appendStart threw before we could
+            // subscribe — the very path this try exists to cover.
+            if (sub != null) {
+                try { sub.close(); } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    private SharedLog.Subscription subscribeForResult(String wfId,
+                                                      CompletableFuture<byte[]> resultFuture) {
+        return sharedLog.getView(LogTag.of("workflow-history", wfId))
+                .subscribe(LogPosition.BEGINNING,
+                        entry -> TerminalEvents.completeFrom(entry, resultFuture, wfId));
+    }
+
+    /**
+     * Durably starts the workflow and returns its ID, doing nothing if this workflow ID was
+     * already started.
+     *
+     * <p>Shared by blocking and async start so the two cannot drift apart on the idempotency
+     * check — the property that makes a retrying caller safe.
+     */
+    private String appendStart(Object[] args) {
         String wfId = (options.workflowId() != null)
                 ? options.workflowId()
                 : UUID.randomUUID().toString();
@@ -97,57 +196,54 @@ class WorkflowStub implements InvocationHandler {
         LogTag taskTag = LogTag.of("workflow-tasks", options.taskQueue());
         LogTag historyTag = LogTag.of("workflow-history", wfId);
         LogView taskView = sharedLog.getView(taskTag);
-        LogView historyView = sharedLog.getView(historyTag);
-
-        // Subscribe BEFORE any append so we never miss WorkflowCompleted
-        CompletableFuture<byte[]> resultFuture = new CompletableFuture<>();
-        SharedLog.Subscription sub = historyView.subscribe(LogPosition.BEGINNING, entry -> {
-            HistoryEvent event = HistorySerializer.INSTANCE.deserialize(entry.data());
-            switch (event) {
-                case HistoryEvent.WorkflowCompleted wc ->
-                        resultFuture.complete(wc.result());
-                case HistoryEvent.WorkflowFailed wf ->
-                        resultFuture.completeExceptionally(
-                                new WorkflowFailureException(wf.workflowId(), wf.errorType(), wf.message()));
-                default -> {}
-            }
-        });
 
         // Idempotency check: if this workflowId was already submitted, skip re-append.
         // Note: narrow race window exists without CAS; acceptable for retry-based callers.
         byte[] alreadyStarted = taskView.getValue("wf-started:" + wfId).join();
-        if (alreadyStarted == null) {
-            byte[] inputBytes = KryoSerializer.toBytes(args != null ? args : new Object[0]);
-            HistoryEvent.WorkflowStarted startedEvent = new HistoryEvent.WorkflowStarted(
-                    UUID.randomUUID().toString(),
-                    Instant.now(),
-                    wfId,
-                    workflowType,
-                    options.taskQueue(),
-                    inputBytes
-            );
-
-            log.info("Starting workflow {} (type={}, taskQueue={})", wfId, workflowType, options.taskQueue());
-
-            sharedLog.append(
-                    AppendRequest.to(Set.of(taskTag, historyTag),
-                            HistorySerializer.INSTANCE.serialize(startedEvent))
-            ).join();
-
-            taskView.setValue("wf-started:" + wfId, new byte[0]).join();
-        } else {
-            log.info("Workflow {} already started, waiting for completion", wfId);
+        if (alreadyStarted != null) {
+            log.info("Workflow {} already started", wfId);
+            return wfId;
         }
 
-        try {
-            byte[] resultBytes = resultFuture.join();
-            if (method.getReturnType() == Void.TYPE || resultBytes == null || resultBytes.length == 0) {
-                return null;
-            }
-            return KryoSerializer.fromBytes(resultBytes);
-        } finally {
-            try { sub.close(); } catch (Exception ignored) {}
-        }
+        byte[] inputBytes = KryoSerializer.toBytes(args != null ? args : new Object[0]);
+        HistoryEvent.WorkflowStarted startedEvent = new HistoryEvent.WorkflowStarted(
+                UUID.randomUUID().toString(),
+                Instant.now(),
+                wfId,
+                workflowType,
+                options.taskQueue(),
+                inputBytes
+        );
+
+        log.info("Starting workflow {} (type={}, taskQueue={})", wfId, workflowType, options.taskQueue());
+
+        sharedLog.append(
+                AppendRequest.to(Set.of(taskTag, historyTag),
+                        HistorySerializer.INSTANCE.serialize(startedEvent))
+        ).join();
+
+        taskView.setValue("wf-started:" + wfId, new byte[0]).join();
+        return wfId;
+    }
+
+    /**
+     * The value an async start returns from the workflow method.
+     *
+     * <p>Must be type-appropriate, not simply {@code null}: a workflow method declared to return
+     * {@code int} would have a {@code null} unboxed at the lambda's return, throwing a
+     * {@link NullPointerException} nowhere near its cause.
+     */
+    private static Object defaultValueFor(Class<?> returnType) {
+        if (!returnType.isPrimitive() || returnType == Void.TYPE) return null;
+        if (returnType == boolean.class) return false;
+        if (returnType == char.class)    return '\0';
+        if (returnType == byte.class)    return (byte) 0;
+        if (returnType == short.class)   return (short) 0;
+        if (returnType == int.class)     return 0;
+        if (returnType == long.class)    return 0L;
+        if (returnType == float.class)   return 0f;
+        if (returnType == double.class)  return 0d;
+        return null;
     }
 
     private Object sendQuery(Method method, Object[] args) {

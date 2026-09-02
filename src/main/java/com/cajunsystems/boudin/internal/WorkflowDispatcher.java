@@ -35,7 +35,12 @@ import java.util.concurrent.ConcurrentHashMap;
 public class WorkflowDispatcher {
 
     private static final Logger log = LoggerFactory.getLogger(WorkflowDispatcher.class);
-    private static final String KV_ACTIVE_WORKFLOWS = "active-workflows";
+    /**
+     * KV key on {@code workflow-tasks:{taskQueue}} holding the Kryo-serialized
+     * {@code HashSet<String>} of in-flight workflow IDs. Public so
+     * {@code WorkflowClient.listWorkflows} reads the same key rather than a second copy of it.
+     */
+    public static final String KV_ACTIVE_WORKFLOWS = "active-workflows";
 
     private final String taskQueue;
     private final SharedLog sharedLog;

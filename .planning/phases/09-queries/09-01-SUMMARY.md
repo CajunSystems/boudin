@@ -1,6 +1,6 @@
 # Phase 9, Plan 1: Query Methods — Summary
 
-## Status: Complete (uncommitted — awaiting review)
+## Status: Merged — PR #3, merge commit `7c4f804` (2026-09-02)
 
 ## What Was Built
 
@@ -124,13 +124,20 @@ Two notes on the review itself:
 
 ## Output
 
-Changes are staged in the working tree, not committed — the repo is on `main` and committing
-was not requested. Suggested commit split:
+Merged in PR #3. Implementation:
 
-- `feat(09-01): add QueryMessage sealed hierarchy and QuerySerializer`
-- `feat(09-01): add WorkflowQueryException and WorkflowOptions.queryTimeout`
-- `feat(09-01): validate query methods at workflow registration`
-- `feat(09-01): handle query requests in WorkflowRunner and WorkflowContext`
-- `feat(09-01): wire query round trip into WorkflowStub and SignalOnlyStub`
-- `test(09-01): end-to-end query tests`
-- `docs(09-01): document query methods in README`
+- `0644ccf` feat(09-01): add QueryMessage sealed hierarchy and QuerySerializer
+- `8f1ca9b` feat(09-01): add WorkflowQueryException and WorkflowOptions.queryTimeout
+- `44ab372` feat(09-01): validate query methods at workflow registration
+- `3c57e26` feat(09-01): handle query requests in WorkflowRunner and WorkflowContext
+- `697696f` feat(09-01): wire query round trip into WorkflowStub and SignalOnlyStub
+- `4c46fc4` test(09-01): end-to-end query tests
+- `8fd0e2d` docs(09-01): document query methods in README
+
+Review fixes:
+
+- `9c516de` fix(09-01): await the pending-workflows gauge instead of reading it synchronously
+- `259dcdb` fix(09-01): resolve inherited signal and query methods, via one shared name helper
+- `c2f47bc` fix(09-01): harden worker-side query handling
+- `71e8888` fix(09-01): bound the whole query round trip and stop rescanning the query tag
+- `a202c19` test(09-01): regression tests for the PR #3 review findings
