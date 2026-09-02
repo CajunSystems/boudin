@@ -4,6 +4,7 @@ import com.cajunsystems.boudin.annotation.QueryMethod;
 import com.cajunsystems.boudin.annotation.SignalMethod;
 import com.cajunsystems.boudin.annotation.WorkflowMethod;
 import com.cajunsystems.boudin.history.HistoryEvent;
+import com.cajunsystems.boudin.internal.WireNames;
 import com.cajunsystems.boudin.history.HistorySerializer;
 import com.cajunsystems.boudin.serialization.KryoSerializer;
 import com.cajunsystems.gumbo.api.SharedLog;
@@ -63,8 +64,7 @@ class SignalOnlyStub implements InvocationHandler {
     }
 
     private Object sendSignal(Method method, Object[] args) throws Exception {
-        SignalMethod ann = method.getAnnotation(SignalMethod.class);
-        String signalName = ann.name().isBlank() ? method.getName() : ann.name();
+        String signalName = WireNames.signalName(method);
         byte[] payloadBytes = KryoSerializer.toBytes(args != null ? args : new Object[0]);
 
         HistoryEvent.SignalReceived signalEvent = new HistoryEvent.SignalReceived(

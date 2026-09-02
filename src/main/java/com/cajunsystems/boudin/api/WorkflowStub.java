@@ -4,6 +4,7 @@ import com.cajunsystems.boudin.annotation.QueryMethod;
 import com.cajunsystems.boudin.annotation.SignalMethod;
 import com.cajunsystems.boudin.annotation.WorkflowMethod;
 import com.cajunsystems.boudin.history.HistoryEvent;
+import com.cajunsystems.boudin.internal.WireNames;
 import com.cajunsystems.boudin.history.HistorySerializer;
 import com.cajunsystems.boudin.serialization.KryoSerializer;
 import com.cajunsystems.gumbo.api.LogView;
@@ -167,8 +168,7 @@ class WorkflowStub implements InvocationHandler {
                     "Call the @WorkflowMethod first.");
         }
 
-        SignalMethod ann = method.getAnnotation(SignalMethod.class);
-        String signalName = ann.name().isBlank() ? method.getName() : ann.name();
+        String signalName = WireNames.signalName(method);
 
         byte[] payloadBytes = KryoSerializer.toBytes(args != null ? args : new Object[0]);
 
