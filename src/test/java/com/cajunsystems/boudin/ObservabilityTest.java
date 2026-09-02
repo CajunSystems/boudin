@@ -15,8 +15,10 @@ import com.cajunsystems.gumbo.service.SharedLogService;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
 
 class ObservabilityTest {
 
@@ -173,10 +175,13 @@ class ObservabilityTest {
             WorkflowOptions.newBuilder().taskQueue("test").build());
         stub.greet("World");
 
-        // After completion, the pending workflows gauge should be 0
-        double pendingValue = registry.get("boudin.worker.pending_workflows")
-            .tag("taskQueue", "test").gauge().value();
-        assertThat(pendingValue).isEqualTo(0.0);
+        // The gauge is decremented by the worker dispatcher's own subscription, which observes
+        // WorkflowCompleted independently of the client's. Since gumbo 0.3.0 each subscription
+        // has its own ordered delivery thread, so greet() can return before the dispatcher has
+        // processed the same event — checking the gauge synchronously here is a race.
+        await().atMost(5, SECONDS).untilAsserted(() ->
+            assertThat(registry.get("boudin.worker.pending_workflows")
+                .tag("taskQueue", "test").gauge().value()).isEqualTo(0.0));
 
         worker.close();
         sharedLog.close();
