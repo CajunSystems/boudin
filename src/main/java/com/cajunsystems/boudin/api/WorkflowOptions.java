@@ -19,14 +19,21 @@ import java.util.Objects;
  */
 public final class WorkflowOptions {
 
+    /** Applied when the caller does not set {@link Builder#queryTimeout(Duration)}. */
+    public static final Duration DEFAULT_QUERY_TIMEOUT = Duration.ofSeconds(10);
+
     private final String taskQueue;
     private final String workflowId;
     private final Duration workflowRunTimeout;
+    private final Duration queryTimeout;
 
     private WorkflowOptions(Builder builder) {
         this.taskQueue = Objects.requireNonNull(builder.taskQueue, "taskQueue must not be null");
         this.workflowId = builder.workflowId;
         this.workflowRunTimeout = builder.workflowRunTimeout;
+        this.queryTimeout = builder.queryTimeout != null
+                ? builder.queryTimeout
+                : DEFAULT_QUERY_TIMEOUT;
     }
 
     public String taskQueue() {
@@ -43,6 +50,14 @@ public final class WorkflowOptions {
         return workflowRunTimeout;
     }
 
+    /**
+     * Returns how long a {@code @QueryMethod} call waits for a worker to answer before
+     * failing. Never null — defaults to {@link #DEFAULT_QUERY_TIMEOUT}.
+     */
+    public Duration queryTimeout() {
+        return queryTimeout;
+    }
+
     public static Builder newBuilder() {
         return new Builder();
     }
@@ -51,6 +66,7 @@ public final class WorkflowOptions {
         private String taskQueue;
         private String workflowId;
         private Duration workflowRunTimeout;
+        private Duration queryTimeout;
 
         private Builder() {}
 
@@ -69,6 +85,15 @@ public final class WorkflowOptions {
         /** Sets the maximum wall-clock time a workflow run may take. */
         public Builder workflowRunTimeout(Duration timeout) {
             this.workflowRunTimeout = timeout;
+            return this;
+        }
+
+        /**
+         * Sets how long a {@code @QueryMethod} call waits for a worker to answer.
+         * Defaults to {@link WorkflowOptions#DEFAULT_QUERY_TIMEOUT}.
+         */
+        public Builder queryTimeout(Duration timeout) {
+            this.queryTimeout = timeout;
             return this;
         }
 

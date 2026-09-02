@@ -150,3 +150,204 @@ Evolve Boudin from a proof-of-concept into a production-grade durable workflow e
 | 6 | Child Workflows | Workflows can start workflows |
 | 7 | Observability | Metrics and MDC tracing in production |
 | 8 | Document & Version Bump | README complete; version `0.1.0`; CHANGELOG |
+
+---
+---
+
+## Milestone 2: Operable Boudin
+
+Milestone 1 produced a correct engine. Milestone 2 makes it something you can put behind an
+HTTP API and operate: read the state of a running workflow, start work without blocking a
+caller thread, stop work that should not continue, scale workers horizontally without
+double-executing, and run workflows that never end.
+
+**Theme:** the control plane. Every phase adds a way to observe or steer an execution from
+outside it.
+
+**Version target:** `0.2.0`
+
+---
+
+### Phase 8.1: Gumbo 0.6.0 Upgrade (inserted)
+
+**Goal:** Unblock full-suite verification. `mvn verify` hung indefinitely on `main` — traced to
+gumbo 0.2.0 dropping any log entry appended while a subscription was still delivering its
+backlog, leaving Boudin callers blocked forever on a terminal event that was never delivered.
+
+**Delivered:**
+- `pom.xml` gumbo `0.2.0` → `0.6.0`; no Boudin code changes required
+- `SubscriptionCatchUpTest` — regression guard that fails on 0.2.0 and passes on 0.6.0
+- Also picks up 0.6.0's multi-tag stream-numbering fix, which silently affected Boudin's
+  dual-tag history + task-queue append, and 0.4.0's conditional KV that Phase 12's leases need
+
+**Exit criteria:** `mvn verify` completes green. ✅ 37/37, three consecutive runs.
+
+---
+
+### Phase 9: Query Methods
+
+**Goal:** Read the state of a running workflow without waiting for it to finish. `@QueryMethod`
+exists as an annotation and a registry lookup but both stubs throw `UnsupportedOperationException`
+— today there is no way to observe an in-flight execution at all.
+
+**Scope:**
+- `QueryMessage` sealed hierarchy (`QueryRequested`, `QueryCompleted`, `QueryFailed`) in a new
+  `query` package with its own Kryo serializer — deliberately **not** part of `HistoryEvent`
+- New log tag `workflow-queries:{workflowId}` — queries are control-plane traffic and must never
+  enter `workflow-history`, which is replayed
+- `WorkflowRunner` subscribes to the query tag; resolves the handler via
+  `WorkflowRegistry.findQueryMethod()`; invokes it on the workflow impl under `signalLock` so a
+  query never interleaves with a signal handler
+- Query round-trip on both `WorkflowStub` and `SignalOnlyStub` (cross-process queries work with
+  only a `SharedLog` reference)
+- `WorkflowQueryException` — clear failure for unknown query name, handler throw, or no worker
+  currently running the workflow
+- `WorkflowOptions.queryTimeout` (default 10s) — client-side bound on the round trip
+- Registration validation — reject query methods that return `void`
+- Fix `README` reference to the non-existent `client.newSignalOnlyStub(...)`
+
+**Exit criteria:** `stub.getStatus()` on a running workflow returns live state from another
+thread and another process; unknown queries and handler failures surface as
+`WorkflowQueryException`.
+
+---
+
+### Phase 10: Async Start & Workflow Handles
+
+**Goal:** Stop forcing the caller to block. `stub.process(order)` currently blocks the calling
+thread for the entire workflow duration, and nothing can reattach to a running execution to
+collect its result.
+
+**Scope:**
+- `WorkflowHandle<T>` — `workflowId()`, `getResult()`, `getResult(Duration)`,
+  `getResultAsync()`, `describe()`
+- `WorkflowClient.start(stub, args)` — starts and returns a handle without blocking
+- `WorkflowClient.getHandle(workflowInterface, workflowId)` — reattach to an execution started
+  by another process
+- Result retrieval for **already-completed** workflows — read the terminal event from history
+  instead of subscribing forever
+- `WorkflowExecutionDescription` — status (`RUNNING`/`COMPLETED`/`FAILED`), type, task queue,
+  start time, close time
+- `WorkflowClient.listWorkflows(taskQueue)` — read the active-workflow KV set
+
+**Exit criteria:** A web request handler can start a workflow, return immediately, and a later
+request in a different process can fetch the result by workflow ID.
+
+---
+
+### Phase 11: Cancellation & Termination
+
+**Goal:** Make it possible to stop a workflow. There is currently no cancel API — a workflow
+parked in `Workflow.await()` waits forever.
+
+**Scope:**
+- `WorkflowCancelRequested` history event; `WorkflowCancelled` terminal event
+- `WorkflowHandle.cancel(reason)` — cooperative: sets the cancellation flag, wakes `signalLock`
+- `Workflow.isCancelRequested()` and `Workflow.cancellationScope(...)` — workflow code observes
+  and handles cancellation
+- Cancellation-aware `Workflow.await()` and `Workflow.sleep()` — throw `CancelledException`
+  rather than parking forever
+- `WorkflowHandle.terminate(reason)` — hard stop: appends `WorkflowFailed`, interrupts the
+  virtual thread, removes from the active set, no cooperation required
+- Cancellation propagates to running child workflows
+- `WorkflowOptions.workflowRunTimeout` enforcement rides on the same machinery (currently
+  defined but never checked)
+
+**Exit criteria:** A parked workflow can be cancelled and observe it; `terminate` stops a
+misbehaving workflow unconditionally.
+
+---
+
+### Phase 12: Worker Task Claiming
+
+**Goal:** Make horizontal scale-out correct. The README already promises "multiple workers can
+target the same task queue", but there is no claim step — every subscribed worker sees every
+`ActivityScheduled` and the only guard is a racy `isAlreadyCompleted()` history read. Two
+workers on one queue will both execute the same activity.
+
+**Scope:**
+- KV-based claim/lease per activity ID and per workflow ID, using gumbo 0.4.0's
+  `compareAndSetTagValue` (available since the Phase 8.1 upgrade)
+- Refuse to start distributed execution unless the configured adapter declares
+  `conditionalAppend` + `multiWriter` via gumbo 0.5.0's `LogCapabilities`, rather than assuming
+  it — note `BatchingPersistenceAdapter` forces `multiWriter` off however capable its delegate is
+- Lease record: owner worker ID, expiry timestamp; only the claim winner executes
+- Lease renewal while an activity runs; expiry releases the task for another worker
+- Orphan recovery — a task whose lease expired without a terminal event is re-claimable
+- Per-worker identity (`Worker.workerId`, defaulted to host + UUID)
+- **Fix:** `ActivityDispatcher` checkpoint KV key is per-tag, so two workers on one queue
+  currently clobber each other's checkpoint — key it by worker ID
+- Tests — two workers, one queue: each activity executes exactly once; killed worker's lease
+  expires and the survivor picks the task up
+
+**Exit criteria:** Two workers on the same task queue execute each activity exactly once, and a
+killed worker's in-flight tasks are recovered by the survivor.
+
+---
+
+### Phase 13: Continue-As-New
+
+**Goal:** Support workflows that never end. Any long-lived loop (subscription billing, polling
+with `Workflow.sleep`) grows its history tag without bound and replays the whole thing on
+recovery.
+
+**Scope:**
+- `Workflow.continueAsNew(args)` — closes the current run and starts a fresh execution with a
+  new history
+- `WorkflowContinuedAsNew` terminal history event carrying the next run ID
+- Run chaining — `{workflowId}:run:{n}`; a handle for the logical workflow ID follows the chain
+  to the currently-active run
+- `WorkflowHandle.getResult()` returns the result of the final run in the chain
+- `WorkflowOptions.historySizeLimit` — a warning metric when a history exceeds a threshold, so
+  users learn they need continue-as-new before they hit trouble
+
+**Exit criteria:** A workflow can loop indefinitely with bounded history per run; a client
+handle resolves the current run transparently.
+
+---
+
+### Phase 14: Document and Version Bump
+
+**Goal:** Document Milestone 2 and release `0.2.0`.
+
+**Scope:**
+- README sections for queries, async start / handles, cancellation, worker scale-out, continue-as-new
+- Update the "Feature Gap vs. Temporal/Cadence" table in `.planning/codebase/CONCERNS.md`
+- `CHANGELOG.md` entry for `0.2.0`
+- `pom.xml` version bump to `0.2.0`
+
+**Exit criteria:** README documents the current feature set; version is `0.2.0`; CHANGELOG updated.
+
+---
+
+## Milestone 2 Phase Summary
+
+| # | Phase | Key Outcome |
+|---|-------|-------------|
+| 9 | Query Methods | Read live workflow state without waiting for completion |
+| 10 | Async Start & Handles | Non-blocking start; reattach to a run from any process |
+| 11 | Cancellation & Termination | Stop a workflow cooperatively or forcibly |
+| 12 | Worker Task Claiming | Multi-worker scale-out executes each task exactly once |
+| 13 | Continue-As-New | Unbounded-duration workflows with bounded history |
+| 14 | Document & Version Bump | README complete; version `0.2.0`; CHANGELOG |
+
+---
+
+## Deferred to Milestone 3+
+
+Considered for Milestone 2 and consciously deferred — recorded so the reasoning is not lost:
+
+| Candidate | Why deferred |
+|-----------|--------------|
+| Determinism toolkit (`Workflow.sideEffect`, `currentTimeMillis`, `randomUUID`) + replay-divergence detection | High value, but pairs naturally with versioning; both belong in one "safe to deploy twice" milestone |
+| Workflow versioning / `Workflow.getVersion()` patching | Same — the deploy-safety milestone |
+| Async activities (`Workflow.async` → `Promise`, `allOf`/`anyOf`) | Large surface; parallel fan-out is a performance feature, not a correctness one |
+| Activity heartbeats + `heartbeatTimeout` | Depends on Phase 12 leases landing first |
+| Saga / compensation helper | Pure library layer on top; no engine changes needed, so it can land any time |
+| Idempotency keys for activities | Needs Phase 12 claiming to be meaningful |
+| Cron / scheduled workflows | Straightforward on the existing timer wheel; not blocking anything |
+| History retention & archival | Continue-as-new (Phase 13) relieves most of the pressure |
+| Interceptor chain (tracing, auth propagation) | Wants a stable public API surface; better after Milestone 2 settles it |
+| Spring Boot starter | Adoption lever, not an engine feature; separate module |
+| `boudin` CLI (describe/history/signal/list) | Best built on Phase 10's `describe()`/`listWorkflows()` |
+| `HistoryEvent` schema versioning | Should land before the first release that promises history compatibility |

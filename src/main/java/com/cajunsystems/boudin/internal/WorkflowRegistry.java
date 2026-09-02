@@ -6,8 +6,11 @@ import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Method;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -40,6 +43,7 @@ public class WorkflowRegistry {
     public void register(Class<?> implClass) {
         Class<?> workflowInterface = findWorkflowInterface(implClass);
         Method workflowMethod = findAnnotatedMethod(workflowInterface, WorkflowMethod.class);
+        validateQueryMethods(workflowInterface);
         String workflowType = workflowInterface.getSimpleName();
 
         Supplier<Object> factory = () -> {
@@ -88,14 +92,8 @@ public class WorkflowRegistry {
      * from the workflow interface. Returns null if not found.
      */
     public Method findSignalMethod(String workflowType, String signalName) {
-        WorkflowEntry entry = requireEntry(workflowType);
-        for (Method method : entry.workflowInterface().getDeclaredMethods()) {
-            SignalMethod ann = method.getAnnotation(SignalMethod.class);
-            if (ann == null) continue;
-            String name = ann.name().isBlank() ? method.getName() : ann.name();
-            if (name.equals(signalName)) return method;
-        }
-        return null;
+        return findByWireName(requireEntry(workflowType).workflowInterface(),
+                WireNames::signalName, signalName);
     }
 
     /**
@@ -103,12 +101,24 @@ public class WorkflowRegistry {
      * Returns null if not found.
      */
     public Method findQueryMethod(String workflowType, String queryName) {
-        WorkflowEntry entry = requireEntry(workflowType);
-        for (Method method : entry.workflowInterface().getDeclaredMethods()) {
-            QueryMethod ann = method.getAnnotation(QueryMethod.class);
-            if (ann == null) continue;
-            String name = ann.name().isBlank() ? method.getName() : ann.name();
-            if (name.equals(queryName)) return method;
+        return findByWireName(requireEntry(workflowType).workflowInterface(),
+                WireNames::queryName, queryName);
+    }
+
+    /**
+     * Resolves a wire name against the interface's public methods.
+     *
+     * <p>Uses {@code getMethods()} rather than {@code getDeclaredMethods()} so a signal or query
+     * inherited from a super-interface resolves. The client proxy reads the annotation off the
+     * invoked method and does not care where it was declared, so a worker that only scanned
+     * declared methods rejected calls the interface genuinely exposes.
+     */
+    private static Method findByWireName(Class<?> iface,
+                                         Function<Method, String> nameOf,
+                                         String wanted) {
+        for (Method method : iface.getMethods()) {
+            String name = nameOf.apply(method);
+            if (name != null && name.equals(wanted)) return method;
         }
         return null;
     }
@@ -135,6 +145,44 @@ public class WorkflowRegistry {
         }
         throw new IllegalArgumentException(
                 implClass.getName() + " does not implement any @WorkflowInterface-annotated interface");
+    }
+
+    /**
+     * Validates every {@link QueryMethod} on the interface: each must return a value (a query
+     * that returns nothing cannot report state), and no two may resolve to the same query name.
+     *
+     * <p>Scans {@code getMethods()}, so queries inherited from a super-interface are validated
+     * too — they are equally invocable, since the client reads the annotation off whichever
+     * method the proxy was handed.
+     */
+    private static void validateQueryMethods(Class<?> iface) {
+        Map<String, Method> byName = new HashMap<>();
+        for (Method method : iface.getMethods()) {
+            String name = WireNames.queryName(method);
+            if (name == null) continue;
+
+            if (method.getReturnType() == Void.TYPE) {
+                throw new IllegalArgumentException(
+                        method.getDeclaringClass().getName() + "#" + method.getName() +
+                        " is annotated @QueryMethod but returns void; " +
+                        "query methods must return the state being queried.");
+            }
+
+            Method existing = byName.put(name, method);
+            // Same name and parameters means one overrides the other, not a name clash —
+            // getMethods() can surface both the declaration and its override.
+            if (existing != null && !isSameSignature(existing, method)) {
+                throw new IllegalArgumentException(
+                        iface.getName() + " has two @QueryMethod methods resolving to the query " +
+                        "name '" + name + "': " + existing.getName() + " and " + method.getName() +
+                        ". Query names must be unique; use @QueryMethod(name=...) to disambiguate.");
+            }
+        }
+    }
+
+    private static boolean isSameSignature(Method a, Method b) {
+        return a.getName().equals(b.getName())
+                && Arrays.equals(a.getParameterTypes(), b.getParameterTypes());
     }
 
     private static Method findAnnotatedMethod(Class<?> iface,

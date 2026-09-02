@@ -4,6 +4,7 @@ import com.cajunsystems.boudin.annotation.QueryMethod;
 import com.cajunsystems.boudin.annotation.SignalMethod;
 import com.cajunsystems.boudin.annotation.WorkflowMethod;
 import com.cajunsystems.boudin.history.HistoryEvent;
+import com.cajunsystems.boudin.internal.WireNames;
 import com.cajunsystems.boudin.history.HistorySerializer;
 import com.cajunsystems.boudin.serialization.KryoSerializer;
 import com.cajunsystems.gumbo.api.SharedLog;
@@ -18,10 +19,15 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * {@link InvocationHandler} for signal-only stubs that target an already-running workflow.
+ * {@link InvocationHandler} for stubs that target an already-running workflow by ID.
  *
- * <p>Used by {@link WorkflowClient#newWorkflowStub(Class, String, String)} to send
- * signals to a workflow identified by its ID without starting a new execution.
+ * <p>Used by {@link WorkflowClient#newWorkflowStub(Class, String, String)} to send signals to,
+ * and run queries against, a workflow identified by its ID without starting a new execution.
+ * Calling the {@code @WorkflowMethod} is rejected.
+ *
+ * <p>Queries use {@link WorkflowOptions#DEFAULT_QUERY_TIMEOUT}. To choose a different timeout,
+ * use {@link WorkflowClient#newWorkflowStub(Class, WorkflowOptions)} with both
+ * {@code workflowId} and {@code queryTimeout} set.
  */
 class SignalOnlyStub implements InvocationHandler {
 
@@ -51,14 +57,14 @@ class SignalOnlyStub implements InvocationHandler {
             return sendSignal(method, args);
         }
         if (method.isAnnotationPresent(QueryMethod.class)) {
-            throw new UnsupportedOperationException("Query methods are not yet supported.");
+            return QueryClient.query(
+                    sharedLog, workflowId, method, args, WorkflowOptions.DEFAULT_QUERY_TIMEOUT);
         }
         throw new UnsupportedOperationException("Unknown method: " + method.getName());
     }
 
     private Object sendSignal(Method method, Object[] args) throws Exception {
-        SignalMethod ann = method.getAnnotation(SignalMethod.class);
-        String signalName = ann.name().isBlank() ? method.getName() : ann.name();
+        String signalName = WireNames.signalName(method);
         byte[] payloadBytes = KryoSerializer.toBytes(args != null ? args : new Object[0]);
 
         HistoryEvent.SignalReceived signalEvent = new HistoryEvent.SignalReceived(

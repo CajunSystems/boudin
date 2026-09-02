@@ -4,6 +4,7 @@ import com.cajunsystems.boudin.annotation.QueryMethod;
 import com.cajunsystems.boudin.annotation.SignalMethod;
 import com.cajunsystems.boudin.annotation.WorkflowMethod;
 import com.cajunsystems.boudin.history.HistoryEvent;
+import com.cajunsystems.boudin.internal.WireNames;
 import com.cajunsystems.boudin.history.HistorySerializer;
 import com.cajunsystems.boudin.serialization.KryoSerializer;
 import com.cajunsystems.gumbo.api.LogView;
@@ -32,7 +33,10 @@ import java.util.concurrent.CompletableFuture;
  *       {@link HistoryEvent.WorkflowFailed} arrives.</li>
  *   <li>{@link SignalMethod}: Appends a {@link HistoryEvent.SignalReceived} event to the
  *       workflow's history tag. Returns immediately.</li>
- *   <li>{@link QueryMethod}: Not yet implemented.</li>
+ *   <li>{@link QueryMethod}: Appends a {@code QueryRequested} to
+ *       {@code workflow-queries:{workflowId}} and blocks until the worker running the
+ *       workflow answers, or {@link WorkflowOptions#queryTimeout()} elapses. Query traffic
+ *       never enters the workflow history.</li>
  * </ul>
  *
  * <p>The stub is <strong>not</strong> thread-safe — do not call signal methods
@@ -46,13 +50,18 @@ class WorkflowStub implements InvocationHandler {
     private final Class<?> workflowInterface;
     private final WorkflowOptions options;
 
-    /** Set after the workflow is started; used by signal/query methods. */
+    /**
+     * The target workflow instance. Taken from {@link WorkflowOptions#workflowId()} when the
+     * caller supplied one — so signals and queries work against a workflow this stub did not
+     * start — otherwise assigned when the workflow is started.
+     */
     private volatile String workflowId;
 
     WorkflowStub(SharedLog sharedLog, Class<?> workflowInterface, WorkflowOptions options) {
         this.sharedLog = sharedLog;
         this.workflowInterface = workflowInterface;
         this.options = options;
+        this.workflowId = options.workflowId();
     }
 
     @Override
@@ -66,8 +75,7 @@ class WorkflowStub implements InvocationHandler {
         } else if (method.isAnnotationPresent(SignalMethod.class)) {
             return sendSignal(method, args);
         } else if (method.isAnnotationPresent(QueryMethod.class)) {
-            throw new UnsupportedOperationException(
-                    "Query methods are not yet supported in Boudin v0.1");
+            return sendQuery(method, args);
         }
         throw new UnsupportedOperationException("Unknown method: " + method.getName());
     }
@@ -142,6 +150,17 @@ class WorkflowStub implements InvocationHandler {
         }
     }
 
+    private Object sendQuery(Method method, Object[] args) {
+        if (workflowId == null) {
+            throw new IllegalStateException(
+                    "Cannot send query: workflow has not been started yet. " +
+                    "Call the @WorkflowMethod first, or use " +
+                    "WorkflowClient.newWorkflowStub(interface, workflowId, taskQueue) " +
+                    "to target a workflow started elsewhere.");
+        }
+        return QueryClient.query(sharedLog, workflowId, method, args, options.queryTimeout());
+    }
+
     private Object sendSignal(Method method, Object[] args) throws Exception {
         if (workflowId == null) {
             throw new IllegalStateException(
@@ -149,8 +168,7 @@ class WorkflowStub implements InvocationHandler {
                     "Call the @WorkflowMethod first.");
         }
 
-        SignalMethod ann = method.getAnnotation(SignalMethod.class);
-        String signalName = ann.name().isBlank() ? method.getName() : ann.name();
+        String signalName = WireNames.signalName(method);
 
         byte[] payloadBytes = KryoSerializer.toBytes(args != null ? args : new Object[0]);
 

@@ -41,10 +41,15 @@ import java.util.Objects;
  * signalStub.cancelOrder("customer request");
  * }</pre>
  *
- * <h2>Sending a signal only (no start)</h2>
+ * <h2>Signalling or querying without starting</h2>
  * <pre>{@code
  * WorkflowClient client = WorkflowClient.newInstance(sharedLog);
- * client.signalWorkflow(OrderWorkflow.class, workflowId, "cancelOrder", "customer request");
+ *
+ * OrderWorkflow existing = client.newWorkflowStub(
+ *     OrderWorkflow.class, workflowId, "orders");
+ *
+ * existing.cancelOrder("customer request");  // @SignalMethod
+ * String status = existing.getStatus();      // @QueryMethod
  * }</pre>
  */
 public class WorkflowClient {
@@ -84,21 +89,18 @@ public class WorkflowClient {
     }
 
     /**
-     * Creates a signal-only stub targeting an already-running workflow by ID.
+     * Creates a stub targeting an already-running workflow by ID, for sending signals and
+     * running queries. It never starts a workflow — calling the {@code @WorkflowMethod} on the
+     * returned stub throws {@link UnsupportedOperationException}.
      *
-     * <p>Calling {@code @WorkflowMethod} on this stub will start a <em>new</em>
-     * workflow with the specified ID. If you only want to signal an existing workflow,
-     * use this stub and call the {@code @SignalMethod} only.
+     * <p>Only a shared log reference is needed, so this works from a process that neither
+     * started the workflow nor runs a worker.
+     *
+     * @param taskQueue the workflow's task queue (recorded for clarity; signals and queries
+     *                  are routed by workflow ID)
      */
     @SuppressWarnings("unchecked")
     public <T> T newWorkflowStub(Class<T> workflowInterface, String workflowId, String taskQueue) {
-        WorkflowOptions opts = WorkflowOptions.newBuilder()
-                .taskQueue(taskQueue)
-                .workflowId(workflowId)
-                .build();
-        WorkflowStub handler = new WorkflowStub(sharedLog, workflowInterface, opts);
-        // Pre-set the workflowId so signal methods work without calling @WorkflowMethod first
-        handler.getWorkflowId(); // touch to verify it's the stub we made
         return (T) Proxy.newProxyInstance(
                 workflowInterface.getClassLoader(),
                 new Class<?>[]{workflowInterface},

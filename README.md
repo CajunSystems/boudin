@@ -29,6 +29,7 @@ Write ordinary Java methods. Get automatic durability, crash recovery, activity 
   - [WorkflowOptions / ActivityOptions](#workflowoptions--activityoptions)
   - [Durable Timers](#durable-timers)
   - [Child Workflows](#child-workflows)
+  - [Queries](#queries)
   - [Observability](#observability)
 - [Package Structure](#package-structure)
 - [Building](#building)
@@ -246,9 +247,9 @@ Signals can be sent from any thread, including from a different process — only
 // From the same process
 stub.approve("TRK-9871");
 
-// From a different process (signal-only stub — does not start a new workflow)
+// From a different process (by-ID stub — does not start a new workflow)
 WorkflowClient client = WorkflowClient.newInstance(sharedLog);
-OrderWorkflow signalStub = client.newSignalOnlyStub(
+OrderWorkflow signalStub = client.newWorkflowStub(
         OrderWorkflow.class, "order-42", "orders");
 signalStub.approve("TRK-9871");
 ```
@@ -264,11 +265,11 @@ signalStub.approve("TRK-9871");
 | `@WorkflowInterface` | Interface | Marks a workflow definition interface |
 | `@WorkflowMethod` | Method | The single entry-point method of a workflow |
 | `@SignalMethod` | Method | Asynchronous signal handler; must return `void` |
-| `@QueryMethod` | Method | (Reserved — not yet implemented) |
+| `@QueryMethod` | Method | Synchronous read of running workflow state; must return a value |
 | `@ActivityInterface` | Interface | Marks an activity definition interface |
 | `@ActivityMethod` | Method | An activity method callable from workflow code |
 
-`@WorkflowMethod`, `@SignalMethod`, and `@ActivityMethod` all accept an optional `name` attribute to override the name stored in the event history.
+`@WorkflowMethod`, `@SignalMethod`, `@QueryMethod`, and `@ActivityMethod` all accept an optional `name` attribute to override the name used on the wire.
 
 ### Worker
 
@@ -299,9 +300,11 @@ WorkflowClient client = WorkflowClient.newInstance(sharedLog);
 MyWorkflow stub = client.newWorkflowStub(MyWorkflow.class, options);
 Result r = stub.run(input);
 
-// Send a signal to an already-running workflow (no new execution started)
-MyWorkflow signalStub = client.newSignalOnlyStub(MyWorkflow.class, workflowId, taskQueue);
-signalStub.mySignal(payload);
+// Target an already-running workflow by ID (no new execution started).
+// Supports @SignalMethod and @QueryMethod; calling @WorkflowMethod throws.
+MyWorkflow existing = client.newWorkflowStub(MyWorkflow.class, workflowId, taskQueue);
+existing.mySignal(payload);
+String state = existing.myQuery();
 ```
 
 `WorkflowClient` does not require a running `Worker` — it only writes to and reads from the shared log.
@@ -430,6 +433,104 @@ try {
 The child workflow must be registered on a worker that listens to the target task queue.
 Both parent and child implementations can be registered on the same `Worker` instance.
 
+### Queries
+
+A `@QueryMethod` reads the current state of a **running** workflow without waiting for it to
+finish and without disturbing it. Queries are synchronous and return a value.
+
+```java
+@WorkflowInterface
+public interface OrderWorkflow {
+
+    @WorkflowMethod
+    OrderResult process(Order order);
+
+    @SignalMethod
+    void approve(String trackingNumber);
+
+    @QueryMethod
+    String getStatus();
+
+    @QueryMethod
+    int getItemCount();
+}
+```
+
+Implement them as ordinary getters over workflow fields:
+
+```java
+public class OrderWorkflowImpl implements OrderWorkflow {
+
+    private volatile String status = "PENDING";
+    private final List<Item> items = new ArrayList<>();
+
+    @Override public String getStatus()  { return status; }
+    @Override public int getItemCount()  { return items.size(); }
+    // ...
+}
+```
+
+Call them on any stub — including one built from just a workflow ID in another process:
+
+```java
+// On the stub that started the workflow
+String status = stub.getStatus();
+
+// From another process — only a SharedLog reference is needed
+WorkflowClient client = WorkflowClient.newInstance(sharedLog);
+OrderWorkflow observer = client.newWorkflowStub(OrderWorkflow.class, "order-42", "orders");
+String status = observer.getStatus();
+```
+
+#### How queries travel
+
+Queries are **control plane, not history**. A `QueryRequested` message goes to a dedicated
+`workflow-queries:{workflowId}` tag; the worker running the workflow answers on the same tag
+with `QueryCompleted` or `QueryFailed`, correlated by a per-request `queryId`.
+
+| Property | Behaviour |
+|----------|-----------|
+| Workflow history | Untouched — query traffic never enters `workflow-history:{workflowId}` |
+| Replay | Unaffected; queries are not replayed and do not grow history |
+| Concurrency | Handlers run under the workflow's signal lock, so a query never interleaves with a signal handler |
+| Visibility | A query may observe the workflow thread between yield points |
+| Timeout | `WorkflowOptions.queryTimeout` — default 10s |
+
+#### Rules and failure modes
+
+- A query method must return a value. `void` is rejected at `registerWorkflow` time.
+- Query names must be unique within an interface; use `@QueryMethod(name = "...")` to disambiguate.
+- Handlers **must not** modify workflow state. This is not enforced — a mutating handler will
+  corrupt deterministic replay.
+- Handlers **must not** block. They hold the workflow's signal lock while running, so this
+  workflow's signal deliveries and other queries queue behind a slow handler. Other workflows
+  on the worker are unaffected — signal delivery runs on a per-workflow thread so one slow
+  handler cannot stall the shared event loop.
+
+Everything that can go wrong surfaces as `WorkflowQueryException`, distinguished by `errorType()`:
+
+| `errorType()` | Cause |
+|---------------|-------|
+| `UnknownQuery` | No `@QueryMethod` with that name on the registered workflow interface |
+| `QueryTimedOut` | Nothing answered in time — the workflow already completed, or no worker is running it |
+| *exception simple name* | The query handler threw |
+
+```java
+try {
+    String status = observer.getStatus();
+} catch (WorkflowQueryException e) {
+    if ("QueryTimedOut".equals(e.errorType())) {
+        // workflow is finished or unhosted — fall back to durable state
+    }
+}
+```
+
+> Queries are answered only while a worker is actively running the workflow. Reading the
+> terminal state of a **completed** workflow is not a query — that is `WorkflowHandle.describe()`,
+> arriving in 0.2.0.
+
+---
+
 ### Observability
 
 #### Metrics
@@ -488,11 +589,12 @@ These keys are cleared automatically when the workflow/activity finishes.
 com.cajunsystems.boudin
 ├── annotation/         @WorkflowInterface, @WorkflowMethod, @SignalMethod,
 │                       @QueryMethod, @ActivityInterface, @ActivityMethod
-├── api/                Worker, WorkflowClient, WorkflowStub, SignalOnlyStub,
-│                       WorkflowOptions, WorkflowFailureException
+├── api/                Worker, WorkflowClient, WorkflowStub, SignalOnlyStub, QueryClient,
+│                       WorkflowOptions, WorkflowFailureException, WorkflowQueryException
 ├── activity/           ActivityStub (InvocationHandler), ActivityOptions,
 │                       ActivityFailureException
 ├── history/            HistoryEvent (sealed hierarchy, 13 record types), HistorySerializer
+├── query/              QueryMessage (QueryRequested/Completed/Failed), QuerySerializer
 ├── internal/           WorkflowDispatcher, ActivityDispatcher, WorkflowRunner,
 │                       WorkflowRegistry, ActivityRegistry, ReplayState,
 │                       BoudinEventLoop, HashedWheelTimer, BoudinMetrics
