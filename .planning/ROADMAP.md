@@ -208,7 +208,7 @@ exists as an annotation and a registry lookup but both stubs throw `UnsupportedO
 
 **Exit criteria:** `stub.getStatus()` on a running workflow returns live state from another
 thread and another process; unknown queries and handler failures surface as
-`WorkflowQueryException`.
+`WorkflowQueryException`. ✅ Merged in PR #3.
 
 ---
 

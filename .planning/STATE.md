@@ -3,10 +3,12 @@
 ## Current Position
 
 - **Milestone:** 2 — Operable Boudin (In Progress)
-- **Phase:** 9 — Query Methods (complete); 8.1 — Gumbo Upgrade (inserted, complete)
-- **Plan:** 09-01 and 08.1-01 — Complete (uncommitted)
-- **Status:** Milestone 1 released as 0.1.0; Milestone 2 planned; Phase 9 built and tested;
-  `mvn verify` green for the first time — 37/37 tests, three consecutive runs
+- **Phase:** 9 — Query Methods (merged); 8.1 — Gumbo Upgrade (inserted, merged)
+- **Plan:** 09-01 and 08.1-01 — Complete
+- **Next:** Phase 10 — Async Start & Workflow Handles
+- **Status:** Merged to `main` in PR #3 (merge commit `7c4f804`, 2026-09-02), CI green.
+  15 commits: the gumbo upgrade, queries, and nine review fixes. `mvn verify` passes 40/40 —
+  the first time the full suite completes in a single JVM.
 
 ## Key Decisions
 
