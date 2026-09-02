@@ -198,6 +198,11 @@ public class WorkflowContext {
      * A query may still observe the workflow thread between yield points; handlers must not
      * modify workflow state.
      *
+     * <p>A handler that runs long therefore delays this workflow's signal deliveries, which is
+     * why {@code WorkflowRunner} delivers signals on a per-workflow thread rather than on the
+     * shared {@code BoudinEventLoop}: otherwise one slow handler would block dispatch for every
+     * workflow on the worker.
+     *
      * @param queryMethod the query handler resolved from the workflow interface
      * @param impl        the workflow implementation instance
      * @param argBytes    Kryo-serialized query arguments

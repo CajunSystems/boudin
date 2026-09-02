@@ -20,7 +20,10 @@ import java.lang.annotation.Target;
  *   <li>Handlers <strong>must not</strong> modify workflow state. This cannot be enforced;
  *       a mutating handler will corrupt deterministic replay.</li>
  *   <li>Handlers <strong>must not</strong> block. They run while holding the workflow's signal
- *       lock, so a blocking handler stalls signal delivery to that workflow.</li>
+ *       lock, so for as long as a handler runs, this workflow's signal deliveries and other
+ *       queries queue behind it. Other workflows on the worker are unaffected — signal delivery
+ *       runs on a per-workflow thread precisely so one slow handler cannot stall the shared
+ *       event loop.</li>
  * </ul>
  *
  * <p>Queries travel on the {@code workflow-queries:{workflowId}} log tag, never the workflow

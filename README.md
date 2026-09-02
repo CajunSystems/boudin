@@ -502,8 +502,10 @@ with `QueryCompleted` or `QueryFailed`, correlated by a per-request `queryId`.
 - Query names must be unique within an interface; use `@QueryMethod(name = "...")` to disambiguate.
 - Handlers **must not** modify workflow state. This is not enforced — a mutating handler will
   corrupt deterministic replay.
-- Handlers **must not** block. They hold the workflow's signal lock while running, so a
-  blocking handler stalls signal delivery to that workflow.
+- Handlers **must not** block. They hold the workflow's signal lock while running, so this
+  workflow's signal deliveries and other queries queue behind a slow handler. Other workflows
+  on the worker are unaffected — signal delivery runs on a per-workflow thread so one slow
+  handler cannot stall the shared event loop.
 
 Everything that can go wrong surfaces as `WorkflowQueryException`, distinguished by `errorType()`:
 
