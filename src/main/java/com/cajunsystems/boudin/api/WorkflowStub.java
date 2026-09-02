@@ -71,6 +71,13 @@ class WorkflowStub implements InvocationHandler {
         }
 
         if (method.isAnnotationPresent(WorkflowMethod.class)) {
+            AsyncStart pending = ASYNC_START.get();
+            if (pending != null) {
+                // Inside WorkflowClient.start(...): durably start the workflow, record the ID for
+                // the handle, and return without waiting for a terminal event.
+                pending.workflowId = appendStart(args);
+                return defaultValueFor(method.getReturnType());
+            }
             return startAndWait(method, args);
         } else if (method.isAnnotationPresent(SignalMethod.class)) {
             return sendSignal(method, args);
@@ -85,58 +92,49 @@ class WorkflowStub implements InvocationHandler {
         return workflowId;
     }
 
+    // ── Async start mode ──────────────────────────────────────────────────────
+
+    /**
+     * Marks the calling thread as being inside {@link WorkflowClient#start}, so a
+     * {@code @WorkflowMethod} invocation starts the workflow and returns instead of waiting.
+     *
+     * <p>A thread-local is what lets a plain typed method call express "start this" — the user
+     * writes {@code client.start(() -> stub.process(order))} and the compiler checks the
+     * arguments, with no per-arity functional interfaces.
+     */
+    private static final ThreadLocal<AsyncStart> ASYNC_START = new ThreadLocal<>();
+
+    /** Carries the started workflow ID back out of the user's lambda. */
+    static final class AsyncStart {
+        String workflowId;
+    }
+
+    static AsyncStart beginAsyncStart() {
+        AsyncStart pending = new AsyncStart();
+        ASYNC_START.set(pending);
+        return pending;
+    }
+
+    static void endAsyncStart() {
+        ASYNC_START.remove();
+    }
+
     // ── Private ───────────────────────────────────────────────────────────────
 
     private Object startAndWait(Method method, Object[] args) throws Exception {
-        String wfId = (options.workflowId() != null)
-                ? options.workflowId()
-                : UUID.randomUUID().toString();
-        this.workflowId = wfId;
-
-        String workflowType = workflowInterface.getSimpleName();
-        LogTag taskTag = LogTag.of("workflow-tasks", options.taskQueue());
-        LogTag historyTag = LogTag.of("workflow-history", wfId);
-        LogView taskView = sharedLog.getView(taskTag);
-        LogView historyView = sharedLog.getView(historyTag);
-
-        // Subscribe BEFORE any append so we never miss WorkflowCompleted
         CompletableFuture<byte[]> resultFuture = new CompletableFuture<>();
-        SharedLog.Subscription sub = historyView.subscribe(LogPosition.BEGINNING, entry -> {
-            HistoryEvent event = HistorySerializer.INSTANCE.deserialize(entry.data());
-            switch (event) {
-                case HistoryEvent.WorkflowCompleted wc ->
-                        resultFuture.complete(wc.result());
-                case HistoryEvent.WorkflowFailed wf ->
-                        resultFuture.completeExceptionally(
-                                new WorkflowFailureException(wf.workflowId(), wf.errorType(), wf.message()));
-                default -> {}
-            }
-        });
 
-        // Idempotency check: if this workflowId was already submitted, skip re-append.
-        // Note: narrow race window exists without CAS; acceptable for retry-based callers.
-        byte[] alreadyStarted = taskView.getValue("wf-started:" + wfId).join();
-        if (alreadyStarted == null) {
-            byte[] inputBytes = KryoSerializer.toBytes(args != null ? args : new Object[0]);
-            HistoryEvent.WorkflowStarted startedEvent = new HistoryEvent.WorkflowStarted(
-                    UUID.randomUUID().toString(),
-                    Instant.now(),
-                    wfId,
-                    workflowType,
-                    options.taskQueue(),
-                    inputBytes
-            );
+        // With a supplied workflow ID we can subscribe before appending. With a generated one the
+        // history tag is not known until the append returns — subscribing from BEGINNING
+        // afterwards is equivalent, since the backlog carries any terminal event already written.
+        SharedLog.Subscription sub = options.workflowId() != null
+                ? subscribeForResult(options.workflowId(), resultFuture)
+                : null;
 
-            log.info("Starting workflow {} (type={}, taskQueue={})", wfId, workflowType, options.taskQueue());
+        String wfId = appendStart(args);
 
-            sharedLog.append(
-                    AppendRequest.to(Set.of(taskTag, historyTag),
-                            HistorySerializer.INSTANCE.serialize(startedEvent))
-            ).join();
-
-            taskView.setValue("wf-started:" + wfId, new byte[0]).join();
-        } else {
-            log.info("Workflow {} already started, waiting for completion", wfId);
+        if (sub == null) {
+            sub = subscribeForResult(wfId, resultFuture);
         }
 
         try {
@@ -148,6 +146,97 @@ class WorkflowStub implements InvocationHandler {
         } finally {
             try { sub.close(); } catch (Exception ignored) {}
         }
+    }
+
+    private SharedLog.Subscription subscribeForResult(String wfId,
+                                                      CompletableFuture<byte[]> resultFuture) {
+        return sharedLog.getView(LogTag.of("workflow-history", wfId))
+                .subscribe(LogPosition.BEGINNING, entry -> completeFrom(entry, resultFuture));
+    }
+
+    private void completeFrom(com.cajunsystems.gumbo.core.LogEntry entry,
+                              CompletableFuture<byte[]> resultFuture) {
+        HistoryEvent event;
+        try {
+            event = HistorySerializer.INSTANCE.deserialize(entry.data());
+        } catch (Exception e) {
+            log.warn("Skipping undeserializable history entry at seqnum {}: {}",
+                    entry.seqnum(), e.toString());
+            return;
+        }
+        switch (event) {
+            case HistoryEvent.WorkflowCompleted wc -> resultFuture.complete(wc.result());
+            case HistoryEvent.WorkflowFailed wf -> resultFuture.completeExceptionally(
+                    new WorkflowFailureException(wf.workflowId(), wf.errorType(), wf.message()));
+            default -> {}
+        }
+    }
+
+    /**
+     * Durably starts the workflow and returns its ID, doing nothing if this workflow ID was
+     * already started.
+     *
+     * <p>Shared by blocking and async start so the two cannot drift apart on the idempotency
+     * check — the property that makes a retrying caller safe.
+     */
+    private String appendStart(Object[] args) {
+        String wfId = (options.workflowId() != null)
+                ? options.workflowId()
+                : UUID.randomUUID().toString();
+        this.workflowId = wfId;
+
+        String workflowType = workflowInterface.getSimpleName();
+        LogTag taskTag = LogTag.of("workflow-tasks", options.taskQueue());
+        LogTag historyTag = LogTag.of("workflow-history", wfId);
+        LogView taskView = sharedLog.getView(taskTag);
+
+        // Idempotency check: if this workflowId was already submitted, skip re-append.
+        // Note: narrow race window exists without CAS; acceptable for retry-based callers.
+        byte[] alreadyStarted = taskView.getValue("wf-started:" + wfId).join();
+        if (alreadyStarted != null) {
+            log.info("Workflow {} already started", wfId);
+            return wfId;
+        }
+
+        byte[] inputBytes = KryoSerializer.toBytes(args != null ? args : new Object[0]);
+        HistoryEvent.WorkflowStarted startedEvent = new HistoryEvent.WorkflowStarted(
+                UUID.randomUUID().toString(),
+                Instant.now(),
+                wfId,
+                workflowType,
+                options.taskQueue(),
+                inputBytes
+        );
+
+        log.info("Starting workflow {} (type={}, taskQueue={})", wfId, workflowType, options.taskQueue());
+
+        sharedLog.append(
+                AppendRequest.to(Set.of(taskTag, historyTag),
+                        HistorySerializer.INSTANCE.serialize(startedEvent))
+        ).join();
+
+        taskView.setValue("wf-started:" + wfId, new byte[0]).join();
+        return wfId;
+    }
+
+    /**
+     * The value an async start returns from the workflow method.
+     *
+     * <p>Must be type-appropriate, not simply {@code null}: a workflow method declared to return
+     * {@code int} would have a {@code null} unboxed at the lambda's return, throwing a
+     * {@link NullPointerException} nowhere near its cause.
+     */
+    private static Object defaultValueFor(Class<?> returnType) {
+        if (!returnType.isPrimitive() || returnType == Void.TYPE) return null;
+        if (returnType == boolean.class) return false;
+        if (returnType == char.class)    return '\0';
+        if (returnType == byte.class)    return (byte) 0;
+        if (returnType == short.class)   return (short) 0;
+        if (returnType == int.class)     return 0;
+        if (returnType == long.class)    return 0L;
+        if (returnType == float.class)   return 0f;
+        if (returnType == double.class)  return 0d;
+        return null;
     }
 
     private Object sendQuery(Method method, Object[] args) {
