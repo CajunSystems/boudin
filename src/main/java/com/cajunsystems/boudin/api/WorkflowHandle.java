@@ -82,8 +82,10 @@ public final class WorkflowHandle<T> {
      * Returns a future completed with the workflow's result, or completed exceptionally with
      * {@link WorkflowFailureException} if it failed.
      *
-     * <p>The underlying log subscription is closed when the future completes, however it
-     * completes, so a caller that abandons the future does not leak it.
+     * <p>The underlying log subscription is closed when the returned future settles — normally,
+     * exceptionally, or because the caller {@linkplain CompletableFuture#cancel cancelled} it.
+     * A caller that gives up waiting should cancel; simply dropping the reference leaves the
+     * subscription open until the workflow terminates.
      */
     public CompletableFuture<T> getResultAsync() {
         LogTag historyTag = LogTag.of("workflow-history", workflowId);
@@ -100,24 +102,36 @@ public final class WorkflowHandle<T> {
 
         SharedLog.Subscription sub = historyView.subscribe(
                 new LogPosition(tip + 1),
-                entry -> completeFrom(entry, resultFuture));
+                entry -> TerminalEvents.completeFrom(entry, resultFuture, workflowId));
 
-        try {
-            for (LogEntry entry : historyView.readAll().join()) {
-                if (entry.seqnum() > tip) break;      // the subscription owns everything past tip
-                completeFrom(entry, resultFuture);
+        // Catch up on everything at or below the tip, but off this thread: joining the read here
+        // would make the "async" variant block for a full history round trip — indefinitely if
+        // the backend hangs — before the caller ever receives the future. The subscription is
+        // already in place, so nothing can slip between the two.
+        historyView.readAll().whenComplete((entries, error) -> {
+            if (error != null) {
+                resultFuture.completeExceptionally(error);
+                return;
+            }
+            for (LogEntry entry : entries) {
+                if (entry.seqnum() > tip) break;   // the subscription owns everything past tip
+                TerminalEvents.completeFrom(entry, resultFuture, workflowId);
                 if (resultFuture.isDone()) break;
             }
-        } catch (Exception e) {
-            resultFuture.completeExceptionally(e);
-        }
+        });
 
-        return resultFuture
-                .handle((bytes, error) -> {
-                    try { sub.close(); } catch (Exception ignored) {}
-                    if (error != null) throw wrap(error);
-                    return this.<T>deserialize(bytes);
-                });
+        CompletableFuture<T> result = resultFuture.handle((bytes, error) -> {
+            if (error != null) throw wrap(error);
+            return this.<T>deserialize(bytes);
+        });
+
+        // Release the subscription when the returned future settles — normally, exceptionally,
+        // or because the caller cancelled it. Cancelling is how a caller that gives up waiting
+        // releases the subscription before the workflow terminates.
+        result.whenComplete((value, error) -> {
+            try { sub.close(); } catch (Exception ignored) {}
+        });
+        return result;
     }
 
     /**
@@ -171,25 +185,6 @@ public final class WorkflowHandle<T> {
 
     // ── Private ───────────────────────────────────────────────────────────────
 
-    private void completeFrom(LogEntry entry, CompletableFuture<byte[]> future) {
-        HistoryEvent event;
-        try {
-            event = HistorySerializer.INSTANCE.deserialize(entry.data());
-        } catch (Exception e) {
-            // An event this build cannot read must not hide a terminal event further along.
-            log.warn("Skipping undeserializable history entry at seqnum {} for workflow {}: {}",
-                    entry.seqnum(), workflowId, e.toString());
-            return;
-        }
-        switch (event) {
-            case HistoryEvent.WorkflowCompleted completed -> future.complete(completed.result());
-            case HistoryEvent.WorkflowFailed failed -> future.completeExceptionally(
-                    new WorkflowFailureException(
-                            failed.workflowId(), failed.errorType(), failed.message()));
-            default -> { }
-        }
-    }
-
     private List<HistoryEvent> readHistory() {
         return sharedLog.getView(LogTag.of("workflow-history", workflowId))
                 .readAll().join().stream()
@@ -218,8 +213,13 @@ public final class WorkflowHandle<T> {
                     ? future.get()
                     : future.get(timeout.toNanos(), TimeUnit.NANOSECONDS);
         } catch (TimeoutException e) {
+            // Cancel so getResultAsync closes the subscription. Without this, a caller polling a
+            // parked workflow with a short timeout — which this exception's message invites —
+            // would accumulate one open subscription per attempt.
+            future.cancel(false);
             throw new WorkflowTimeoutException(workflowId, timeout);
         } catch (InterruptedException e) {
+            future.cancel(false);
             Thread.currentThread().interrupt();
             throw new IllegalStateException(
                     "Interrupted while waiting for workflow " + workflowId, e);

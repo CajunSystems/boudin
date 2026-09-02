@@ -75,7 +75,17 @@ class WorkflowStub implements InvocationHandler {
             if (pending != null) {
                 // Inside WorkflowClient.start(...): durably start the workflow, record the ID for
                 // the handle, and return without waiting for a terminal event.
+                if (pending.workflowId != null) {
+                    // start() can only hand back one handle, so a second workflow would run
+                    // unobserved. Fail before durably starting it rather than after.
+                    throw new IllegalStateException(
+                            "WorkflowClient.start(...) started more than one workflow. Its lambda "
+                            + "must call exactly one @WorkflowMethod — '" + pending.workflowId
+                            + "' was already started, and only one handle can be returned. "
+                            + "Call start(...) once per workflow.");
+                }
                 pending.workflowId = appendStart(args);
+                pending.sharedLog = sharedLog;
                 return defaultValueFor(method.getReturnType());
             }
             return startAndWait(method, args);
@@ -104,12 +114,20 @@ class WorkflowStub implements InvocationHandler {
      */
     private static final ThreadLocal<AsyncStart> ASYNC_START = new ThreadLocal<>();
 
-    /** Carries the started workflow ID back out of the user's lambda. */
+    /** Carries the started workflow ID, and the log it was started on, out of the user's lambda. */
     static final class AsyncStart {
         String workflowId;
+        SharedLog sharedLog;
     }
 
     static AsyncStart beginAsyncStart() {
+        if (ASYNC_START.get() != null) {
+            // A nested start would overwrite the outer thread-local and then clear it on the way
+            // out, silently dropping the outer lambda back into blocking start.
+            throw new IllegalStateException(
+                    "WorkflowClient.start(...) cannot be nested inside another start(...). "
+                    + "Start each workflow with its own top-level call.");
+        }
         AsyncStart pending = new AsyncStart();
         ASYNC_START.set(pending);
         return pending;
@@ -131,45 +149,34 @@ class WorkflowStub implements InvocationHandler {
                 ? subscribeForResult(options.workflowId(), resultFuture)
                 : null;
 
-        String wfId = appendStart(args);
-
-        if (sub == null) {
-            sub = subscribeForResult(wfId, resultFuture);
-        }
-
+        // appendStart can throw — an unreachable log backend fails inside its join() calls — so
+        // it belongs inside the try that closes the subscription. Otherwise every failed or
+        // retried start with a supplied workflow ID leaked one subscription.
         try {
+            String wfId = appendStart(args);
+            if (sub == null) {
+                sub = subscribeForResult(wfId, resultFuture);
+            }
+
             byte[] resultBytes = resultFuture.join();
             if (method.getReturnType() == Void.TYPE || resultBytes == null || resultBytes.length == 0) {
                 return null;
             }
             return KryoSerializer.fromBytes(resultBytes);
         } finally {
-            try { sub.close(); } catch (Exception ignored) {}
+            // Still null when the ID was generated and appendStart threw before we could
+            // subscribe — the very path this try exists to cover.
+            if (sub != null) {
+                try { sub.close(); } catch (Exception ignored) {}
+            }
         }
     }
 
     private SharedLog.Subscription subscribeForResult(String wfId,
                                                       CompletableFuture<byte[]> resultFuture) {
         return sharedLog.getView(LogTag.of("workflow-history", wfId))
-                .subscribe(LogPosition.BEGINNING, entry -> completeFrom(entry, resultFuture));
-    }
-
-    private void completeFrom(com.cajunsystems.gumbo.core.LogEntry entry,
-                              CompletableFuture<byte[]> resultFuture) {
-        HistoryEvent event;
-        try {
-            event = HistorySerializer.INSTANCE.deserialize(entry.data());
-        } catch (Exception e) {
-            log.warn("Skipping undeserializable history entry at seqnum {}: {}",
-                    entry.seqnum(), e.toString());
-            return;
-        }
-        switch (event) {
-            case HistoryEvent.WorkflowCompleted wc -> resultFuture.complete(wc.result());
-            case HistoryEvent.WorkflowFailed wf -> resultFuture.completeExceptionally(
-                    new WorkflowFailureException(wf.workflowId(), wf.errorType(), wf.message()));
-            default -> {}
-        }
+                .subscribe(LogPosition.BEGINNING,
+                        entry -> TerminalEvents.completeFrom(entry, resultFuture, wfId));
     }
 
     /**
